@@ -8,7 +8,7 @@ use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::trace::TraceContext;
+use crate::metadata::RunContext;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -37,7 +37,7 @@ pub struct SpawnResult {
     pub summary: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<Artifact>,
-    pub trace_id: String,
+    pub run_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -76,33 +76,23 @@ pub struct SpawnFailedData {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventContext {
-    pub trace_id: String,
-    pub span_id: String,
-    pub parent_span_id: Option<String>,
-    pub session_id: String,
+    pub run_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_run_id: Option<String>,
 }
 
 impl EventContext {
-    pub fn new(
-        trace_id: impl Into<String>,
-        span_id: impl Into<String>,
-        parent_span_id: Option<impl Into<String>>,
-        session_id: impl Into<String>,
-    ) -> Self {
+    pub fn new(run_id: impl Into<String>, parent_run_id: Option<impl Into<String>>) -> Self {
         Self {
-            trace_id: trace_id.into(),
-            span_id: span_id.into(),
-            parent_span_id: parent_span_id.map(Into::into),
-            session_id: session_id.into(),
+            run_id: run_id.into(),
+            parent_run_id: parent_run_id.map(Into::into),
         }
     }
 
-    pub fn from_trace(trace: &TraceContext) -> Self {
+    pub fn from_run(run: &RunContext) -> Self {
         Self {
-            trace_id: trace.trace_id.clone(),
-            span_id: trace.span_id.clone(),
-            parent_span_id: trace.parent_span_id.clone(),
-            session_id: trace.session_id.clone(),
+            run_id: run.run_id.clone(),
+            parent_run_id: run.parent_run_id.clone(),
         }
     }
 }
@@ -223,7 +213,7 @@ mod tests {
     #[test]
     fn serializes_event_with_required_top_level_fields() {
         let event = EventEnvelope::new(
-            EventContext::new("trace-1", "span-1", Some("parent-1"), "session-1"),
+            EventContext::new("run-1", Some("run-root")),
             "2026-04-16T12:34:56Z",
             EventKind::SpawnStarted,
             json!({
@@ -238,10 +228,8 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "trace_id": "trace-1",
-                "span_id": "span-1",
-                "parent_span_id": "parent-1",
-                "session_id": "session-1",
+                "run_id": "run-1",
+                "parent_run_id": "run-root",
                 "timestamp": "2026-04-16T12:34:56Z",
                 "event": "spawn_started",
                 "data": {
@@ -270,7 +258,7 @@ mod tests {
     #[test]
     fn writes_one_valid_json_object_per_line() {
         let started = EventEnvelope::new(
-            EventContext::new("trace-1", "span-1", None::<String>, "session-1"),
+            EventContext::new("run-1", None::<String>),
             "2026-04-16T12:34:56Z",
             EventKind::SpawnStarted,
             json!({
@@ -278,7 +266,7 @@ mod tests {
             }),
         );
         let completed = EventEnvelope::new(
-            EventContext::new("trace-1", "span-1", None::<String>, "session-1"),
+            EventContext::new("run-1", None::<String>),
             "2026-04-16T12:35:10Z",
             EventKind::SpawnCompleted,
             json!({
@@ -286,7 +274,7 @@ mod tests {
                     status: ResultStatus::Success,
                     summary: "finished".into(),
                     artifacts: vec![],
-                    trace_id: "trace-1".into(),
+                    run_id: "run-1".into(),
                     error: None,
                     exit_code: Some(0),
                 }
@@ -317,7 +305,7 @@ mod tests {
     #[test]
     fn surfaces_writer_errors() {
         let event = EventEnvelope::new(
-            EventContext::new("trace-1", "span-1", None::<String>, "session-1"),
+            EventContext::new("run-1", None::<String>),
             "2026-04-16T12:34:56Z",
             EventKind::SpawnFailed,
             json!({

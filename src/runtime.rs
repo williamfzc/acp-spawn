@@ -15,8 +15,8 @@ use crate::event::{
     EventContext, EventEnvelope, EventKind, JsonlWriteError, JsonlWriter, ResultStatus,
     SpawnCompletedData, SpawnFailedData, SpawnResult, SpawnStartedData, TimestampError,
 };
+use crate::metadata::RunContext;
 use crate::process::{self, ProcessError, ProcessSpec, ProcessTermination};
-use crate::trace::TraceContext;
 
 pub const ACP_SPAWN_GOAL_ENV: &str = "ACP_SPAWN_GOAL";
 pub const DEFAULT_TIMEOUT_MS: u64 = 300_000;
@@ -34,7 +34,7 @@ pub struct RunRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunOutcome {
-    pub trace: TraceContext,
+    pub run: RunContext,
     pub result: SpawnResult,
 }
 
@@ -57,24 +57,24 @@ pub enum RuntimeError {
     ChildExitedNonZero {
         agent: String,
         exit_code: i32,
-        trace_id: String,
+        run_id: String,
         spawn_id: String,
     },
     ChildTimedOut {
         agent: String,
         timeout_ms: u64,
-        trace_id: String,
+        run_id: String,
         spawn_id: String,
     },
     ChildCancelled {
         agent: String,
         reason: String,
-        trace_id: String,
+        run_id: String,
         spawn_id: String,
     },
     ChildTerminated {
         agent: String,
-        trace_id: String,
+        run_id: String,
         spawn_id: String,
     },
 }
@@ -114,37 +114,37 @@ impl fmt::Display for RuntimeError {
             Self::ChildExitedNonZero {
                 agent,
                 exit_code,
-                trace_id,
+                run_id,
                 spawn_id,
             } => write!(
                 f,
-                "child agent '{agent}' exited with code {exit_code} (trace_id={trace_id}, spawn_id={spawn_id})"
+                "child agent '{agent}' exited with code {exit_code} (run_id={run_id}, spawn_id={spawn_id})"
             ),
             Self::ChildTimedOut {
                 agent,
                 timeout_ms,
-                trace_id,
+                run_id,
                 spawn_id,
             } => write!(
                 f,
-                "child agent '{agent}' timed out after {timeout_ms}ms (trace_id={trace_id}, spawn_id={spawn_id})"
+                "child agent '{agent}' timed out after {timeout_ms}ms (run_id={run_id}, spawn_id={spawn_id})"
             ),
             Self::ChildCancelled {
                 agent,
                 reason,
-                trace_id,
+                run_id,
                 spawn_id,
             } => write!(
                 f,
-                "child agent '{agent}' was cancelled: {reason} (trace_id={trace_id}, spawn_id={spawn_id})"
+                "child agent '{agent}' was cancelled: {reason} (run_id={run_id}, spawn_id={spawn_id})"
             ),
             Self::ChildTerminated {
                 agent,
-                trace_id,
+                run_id,
                 spawn_id,
             } => write!(
                 f,
-                "child agent '{agent}' terminated without an exit code (trace_id={trace_id}, spawn_id={spawn_id})"
+                "child agent '{agent}' terminated without an exit code (run_id={run_id}, spawn_id={spawn_id})"
             ),
         }
     }
@@ -230,23 +230,19 @@ pub fn run_with_io<W: Write, E: Write>(
     stdout: W,
     stderr: E,
 ) -> Result<RunOutcome, RuntimeError> {
-    let trace = TraceContext::from_environment_or_root();
+    let run = RunContext::from_environment_or_root();
     let timeout = request
         .timeout
         .unwrap_or_else(|| Duration::from_millis(DEFAULT_TIMEOUT_MS));
     let timeout_ms = duration_to_millis(timeout);
-    let mut emitter = RuntimeEmitter::new(trace.clone(), stdout, stderr);
+    let mut emitter = RuntimeEmitter::new(run.clone(), stdout, stderr);
 
     let cwd = match resolve_cwd(&request.cwd) {
         Ok(cwd) => cwd,
         Err(error) => {
             emitter.emit_failed(
                 0,
-                failure_result(
-                    &trace,
-                    "failed to determine current working directory",
-                    None,
-                ),
+                failure_result(&run, "failed to determine current working directory", None),
                 "failed to determine current working directory",
                 None,
             )?;
@@ -257,7 +253,7 @@ pub fn run_with_io<W: Write, E: Write>(
     if let Err(error) = validate_cwd(&cwd) {
         emitter.emit_failed(
             0,
-            failure_result(&trace, &error.to_string(), None),
+            failure_result(&run, &error.to_string(), None),
             &error.to_string(),
             None,
         )?;
@@ -268,7 +264,7 @@ pub fn run_with_io<W: Write, E: Write>(
         program: OsString::from(&request.agent),
         args: request.agent_args.iter().map(OsString::from).collect(),
         cwd: cwd.clone(),
-        env: child_process_env(&request.goal, &trace),
+        env: child_process_env(&request.goal, &run),
         timeout: Some(timeout),
         termination_grace_period: Duration::from_millis(TERMINATION_GRACE_PERIOD_MS),
     };
@@ -278,7 +274,7 @@ pub fn run_with_io<W: Write, E: Write>(
         Err(error) => {
             emitter.emit_failed(
                 0,
-                failure_result(&trace, &error.to_string(), None),
+                failure_result(&run, &error.to_string(), None),
                 &error.to_string(),
                 None,
             )?;
@@ -317,33 +313,33 @@ pub fn run_with_io<W: Write, E: Write>(
                 status: ResultStatus::Success,
                 summary: format!("agent '{}' completed successfully", request.agent),
                 artifacts: vec![],
-                trace_id: trace.trace_id.clone(),
+                run_id: run.run_id.clone(),
                 error: None,
                 exit_code: output.exit_code,
             };
             emitter.emit_completed(duration_ms, output.exit_code.unwrap_or(0), result.clone())?;
 
-            Ok(RunOutcome { trace, result })
+            Ok(RunOutcome { run, result })
         }
         ProcessTermination::TimedOut => {
             let reason = format!("child process timed out after {timeout_ms}ms");
-            let result = failure_result(&trace, &reason, output.exit_code);
+            let result = failure_result(&run, &reason, output.exit_code);
             emitter.emit_failed(duration_ms, result, &reason, output.exit_code)?;
             Err(RuntimeError::ChildTimedOut {
                 agent: request.agent,
                 timeout_ms,
-                trace_id: trace.trace_id,
-                spawn_id: trace.spawn_id,
+                run_id: run.run_id,
+                spawn_id: run.spawn_id,
             })
         }
         ProcessTermination::Cancelled { reason } => {
-            let result = failure_result(&trace, &reason, output.exit_code);
+            let result = failure_result(&run, &reason, output.exit_code);
             emitter.emit_failed(duration_ms, result, &reason, output.exit_code)?;
             Err(RuntimeError::ChildCancelled {
                 agent: request.agent,
                 reason,
-                trace_id: trace.trace_id,
-                spawn_id: trace.spawn_id,
+                run_id: run.run_id,
+                spawn_id: run.spawn_id,
             })
         }
         ProcessTermination::Exited => {
@@ -351,35 +347,35 @@ pub fn run_with_io<W: Write, E: Write>(
                 Some(exit_code) => RuntimeError::ChildExitedNonZero {
                     agent: request.agent.clone(),
                     exit_code,
-                    trace_id: trace.trace_id.clone(),
-                    spawn_id: trace.spawn_id.clone(),
+                    run_id: run.run_id.clone(),
+                    spawn_id: run.spawn_id.clone(),
                 },
                 None => RuntimeError::ChildTerminated {
                     agent: request.agent.clone(),
-                    trace_id: trace.trace_id.clone(),
-                    spawn_id: trace.spawn_id.clone(),
+                    run_id: run.run_id.clone(),
+                    spawn_id: run.spawn_id.clone(),
                 },
             };
-            let result = failure_result(&trace, &error.to_string(), output.exit_code);
+            let result = failure_result(&run, &error.to_string(), output.exit_code);
             emitter.emit_failed(duration_ms, result, &error.to_string(), output.exit_code)?;
             Err(error)
         }
     }
 }
 
-fn failure_result(trace: &TraceContext, summary: &str, exit_code: Option<i32>) -> SpawnResult {
+fn failure_result(run: &RunContext, summary: &str, exit_code: Option<i32>) -> SpawnResult {
     SpawnResult {
         status: ResultStatus::Failed,
         summary: summary.to_string(),
         artifacts: vec![],
-        trace_id: trace.trace_id.clone(),
+        run_id: run.run_id.clone(),
         error: Some(summary.to_string()),
         exit_code,
     }
 }
 
-fn child_process_env(goal: &str, trace: &TraceContext) -> Vec<(String, String)> {
-    let mut env = trace.as_child_process_env();
+fn child_process_env(goal: &str, run: &RunContext) -> Vec<(String, String)> {
+    let mut env = run.as_child_process_env();
     env.push((ACP_SPAWN_GOAL_ENV.to_string(), goal.to_string()));
     env
 }
@@ -415,16 +411,16 @@ fn duration_to_millis_u128(duration: Duration) -> u128 {
 
 struct RuntimeEmitter<W, E> {
     context: EventContext,
-    trace: TraceContext,
+    run: RunContext,
     stdout: JsonlWriter<W>,
     stderr: E,
 }
 
 impl<W: Write, E: Write> RuntimeEmitter<W, E> {
-    fn new(trace: TraceContext, stdout: W, stderr: E) -> Self {
+    fn new(run: RunContext, stdout: W, stderr: E) -> Self {
         Self {
-            context: EventContext::from_trace(&trace),
-            trace,
+            context: EventContext::from_run(&run),
+            run,
             stdout: JsonlWriter::new(stdout),
             stderr,
         }
@@ -443,7 +439,7 @@ impl<W: Write, E: Write> RuntimeEmitter<W, E> {
         self.write_event(
             EventKind::SpawnStarted,
             SpawnStartedData {
-                spawn_id: self.trace.spawn_id.clone(),
+                spawn_id: self.run.spawn_id.clone(),
                 agent: agent.to_string(),
                 command,
                 cwd: cwd.display().to_string(),
@@ -468,7 +464,7 @@ impl<W: Write, E: Write> RuntimeEmitter<W, E> {
         self.write_event(
             EventKind::SpawnCompleted,
             SpawnCompletedData {
-                spawn_id: self.trace.spawn_id.clone(),
+                spawn_id: self.run.spawn_id.clone(),
                 duration_ms,
                 exit_code,
                 result,
@@ -486,7 +482,7 @@ impl<W: Write, E: Write> RuntimeEmitter<W, E> {
         self.write_event(
             EventKind::SpawnFailed,
             SpawnFailedData {
-                spawn_id: self.trace.spawn_id.clone(),
+                spawn_id: self.run.spawn_id.clone(),
                 duration_ms,
                 reason: reason.to_string(),
                 exit_code,
@@ -525,9 +521,9 @@ mod tests {
     use serde_json::Value;
 
     use crate::cancel::CancellationHandle;
-    use crate::trace::{SESSION_ID_ENV, SPAN_ID_ENV, TRACE_ID_ENV};
+    use crate::metadata::{PARENT_RUN_ID_ENV, RUN_ID_ENV};
 
-    use super::{ACP_SPAWN_GOAL_ENV, RunRequest, RuntimeError, TraceContext, run_with_io};
+    use super::{ACP_SPAWN_GOAL_ENV, RunContext, RunRequest, RuntimeError, run_with_io};
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -621,19 +617,17 @@ printf 'stderr-line\n' >&2
 
     #[cfg(unix)]
     #[test]
-    fn run_inherits_existing_trace_id_from_environment() {
+    fn run_records_parent_run_id_from_environment() {
         let cwd = create_temp_dir("runtime-inherit");
         let script = create_script(
             "inherit-trace.sh",
             r#"#!/bin/sh
-printf '{"event":"trace_check","trace":"%s","parent":"%s","session":"%s"}\n' "$TRACE_ID" "$PARENT_SPAN_ID" "$SESSION_ID"
+printf '{"event":"run_check","run":"%s","parent":"%s"}\n' "$RUN_ID" "$PARENT_RUN_ID"
 "#,
         );
 
         unsafe {
-            env::set_var(TRACE_ID_ENV, "trace-parent");
-            env::set_var(SPAN_ID_ENV, "span-parent");
-            env::set_var(SESSION_ID_ENV, "session-parent");
+            env::set_var(RUN_ID_ENV, "run-parent");
         }
 
         let stdout = SharedBuffer::default();
@@ -654,17 +648,12 @@ printf '{"event":"trace_check","trace":"%s","parent":"%s","session":"%s"}\n' "$T
         .expect("run should succeed");
 
         unsafe {
-            env::remove_var(TRACE_ID_ENV);
-            env::remove_var(SPAN_ID_ENV);
-            env::remove_var(SESSION_ID_ENV);
+            env::remove_var(RUN_ID_ENV);
         }
 
         let events = parse_json_lines(&stdout.contents());
-        assert_eq!(outcome.trace.trace_id, "trace-parent");
-        assert_eq!(outcome.trace.parent_span_id.as_deref(), Some("span-parent"));
-        assert_eq!(outcome.trace.session_id, "session-parent");
-        assert_eq!(events[1]["trace"], "trace-parent");
-        assert_eq!(events[1]["parent"], "span-parent");
+        assert_eq!(outcome.run.parent_run_id.as_deref(), Some("run-parent"));
+        assert_eq!(events[1]["parent"], "run-parent");
     }
 
     #[cfg(unix)]
@@ -820,20 +809,18 @@ sleep 5
     }
 
     #[test]
-    fn child_process_env_contains_goal_and_trace_fields() {
-        let trace = TraceContext {
-            trace_id: "trace-1".into(),
-            span_id: "span-1".into(),
-            parent_span_id: Some("span-root".into()),
+    fn child_process_env_contains_goal_and_run_fields() {
+        let run = RunContext {
+            run_id: "run-1".into(),
+            parent_run_id: Some("run-root".into()),
             spawn_id: "spawn-1".into(),
-            session_id: "session-1".into(),
         };
 
-        let env = super::child_process_env("ship it", &trace);
+        let env = super::child_process_env("ship it", &run);
 
         assert!(env.contains(&(ACP_SPAWN_GOAL_ENV.to_string(), "ship it".into())));
-        assert!(env.contains(&(TRACE_ID_ENV.to_string(), "trace-1".into())));
-        assert!(env.contains(&(SPAN_ID_ENV.to_string(), "span-1".into())));
+        assert!(env.contains(&(RUN_ID_ENV.to_string(), "run-1".into())));
+        assert!(env.contains(&(PARENT_RUN_ID_ENV.to_string(), "run-root".into())));
     }
 
     #[test]
