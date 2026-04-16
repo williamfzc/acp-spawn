@@ -4,6 +4,33 @@
 
 It is intentionally a thin spawn runtime: a composable primitive that higher-level agents, skills, and orchestrators can call without taking on a lot of extra runtime concepts.
 
+## What This Project Does
+
+```mermaid
+flowchart LR
+    A["Parent agent / skill / orchestrator"] -->|"runs acp-spawn run with agent, goal, cwd, timeout"| B["acp-spawn"]
+    B -->|"starts child process"| C["Child agent or command"]
+    B -->|"emits lifecycle JSONL to stdout"| D["`spawn_started`"]
+    C -->|"writes native ACP / JSONL stdout"| E["Child stdout passthrough"]
+    C -->|"writes stderr"| F["Child stderr passthrough"]
+    C -->|"exits, times out, or gets cancelled"| B
+    B -->|"emits final lifecycle JSONL to stdout"| G["spawn_completed or spawn_failed"]
+
+    H["Run metadata"] -.->|"adds `run_id`, optional `parent_run_id`, `spawn_id`, `ACP_SPAWN_GOAL`"| C
+
+    subgraph Stdout["Stdout stream"]
+        D
+        E
+        G
+    end
+
+    subgraph Stderr["Stderr stream"]
+        F
+    end
+```
+
+The key idea is that `acp-spawn` supervises the child process and reports lifecycle events, but it does not reinterpret the child's stdout. That keeps the runtime small and lets downstream tools consume the child's native ACP or JSONL output directly.
+
 ## Current Capabilities
 
 - Supports `acp-spawn run --agent --goal --cwd [--agent-arg ...] [--timeout-ms ...]`
