@@ -1,11 +1,10 @@
-mod cli;
-mod runtime;
+//! Starts the ACP spawn runtime CLI binary.
 
 use std::process::ExitCode;
 
+use acp_spawn::cli::{Cli, Commands};
+use acp_spawn::runtime::{self, RunRequest};
 use clap::Parser;
-use cli::{Cli, Commands};
-use runtime::RunRequest;
 
 fn main() -> ExitCode {
     match try_main() {
@@ -23,9 +22,7 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Run(args) => {
             let request = RunRequest::try_from(args)?;
-            let outcome = runtime::run(request)?;
-
-            eprintln!("{}", outcome.summary);
+            runtime::run(request)?;
         }
     }
 

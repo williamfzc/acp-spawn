@@ -1,24 +1,78 @@
 # acp-spawn
 
-`acp-spawn` 是一个用 Rust 编写的 ACP spawn runtime CLI。当前已完成 Task 1 的最小骨架：提供 `run` 子命令，接收目标 agent、任务目标与工作目录，并打通到 runtime 的最小调用链。
+`acp-spawn` is a Rust CLI for running spawned agents with ACP-friendly JSONL observability. The current MVP can spawn child processes, emit structured lifecycle events to stdout, pass child stdout through natively, propagate trace context, and enforce timeout or cancellation.
 
-## 当前能力
+## Current Capabilities
 
-- 提供 `acp-spawn run --agent --goal --cwd` 入口
-- 使用 `clap` 生成参数校验与帮助信息
-- 在进入 runtime 前校验工作目录是否存在且为目录
-- 执行一次最小空载运行，当前仅完成 runtime 初始化与参数透传
+- Supports `acp-spawn run --agent --goal --cwd [--agent-arg ...] [--timeout-ms ...]`
+- Supports `acp-spawn run --config <FILE> [--profile <NAME>]` for config-driven targets
+- Generates or inherits `trace_id`, `span_id`, `parent_span_id`, `spawn_id`, and `session_id`
+- Emits strict lifecycle JSONL events on stdout: `spawn_started`, `spawn_completed`, and `spawn_failed`
+- Keeps stderr for raw child stderr and human-readable runtime errors
+- Supports cancellation and timeout-driven termination
+- Passes child stdout through natively without parsing, wrapping, or enriching ACP events
 
-## 快速开始
+## Quick Start
 
 ```bash
-cargo run -- run --agent codex --goal "implement parser" --cwd .
+cargo run -- run --config examples/spawn-profiles.toml
 ```
 
-示例输出当前写入 `stderr`，用于说明 runtime 已被成功调用：
+Example stdout:
 
-```text
-initialized spawn runtime for agent 'codex' with goal 'implement parser' in /path/to/repo
+```json
+{"trace_id":"...","span_id":"...","parent_span_id":null,"session_id":"...","timestamp":"...","event":"spawn_started","data":{"spawn_id":"...","agent":"/bin/sh","command":["/bin/sh","-c","printf '{\"event\":\"demo\"}\\n'"],"cwd":"/path/to/repo","timeout_ms":1000,"pid":12345}}
+{"event":"demo"}
+{"trace_id":"...","span_id":"...","parent_span_id":null,"session_id":"...","timestamp":"...","event":"spawn_completed","data":{"spawn_id":"...","duration_ms":12,"exit_code":0,"result":{"status":"success","summary":"agent '/bin/sh' completed successfully","trace_id":"...","exit_code":0}}}
 ```
 
-后续任务会继续补充 JSONL 事件输出、trace 传播、子进程管理与结果归并等能力。
+## Config Format
+
+Use `examples/spawn-profiles.toml` as the reference format:
+
+```toml
+[run]
+agent = "/bin/sh"
+agent_args = ["-c", "printf '{\"event\":\"demo\"}\n'"]
+goal = "demo success"
+cwd = ".."
+timeout_ms = 1000
+
+[profiles.opencode-acp]
+agent = "opencode"
+agent_args = ["acp"]
+goal = "serve acp"
+cwd = ".."
+timeout_ms = 3000
+```
+
+The root `[run]` section is used when `--profile` is omitted. Named profiles under `[profiles.<name>]` can be selected with `--profile`.
+
+Relative `cwd` values are resolved relative to the config file location, not the shell working directory.
+
+## Test With `opencode acp`
+
+Run the predefined profile:
+
+```bash
+cargo run -- run --config examples/spawn-profiles.toml --profile opencode-acp
+```
+
+This is useful as a smoke test:
+
+- stdout contains `acp-spawn` lifecycle JSONL plus the child process stdout lines exactly as emitted
+- If `opencode acp` does not exit before the timeout, the runtime emits `spawn_failed`
+- Raw child stderr is still forwarded to stderr for debugging
+
+To drive a real ACP request through `acp-spawn`, provide a stdin payload file:
+
+```bash
+cargo run -- run --config examples/spawn-profiles.toml --profile opencode-acp --input-file examples/opencode-initialize.jsonl
+```
+
+This forwards the file contents to child stdin unchanged while preserving lifecycle events on stdout. With `opencode acp`, the example returns a real `initialize` result.
+
+## Output Contract
+
+- stdout: lifecycle JSONL emitted by `acp-spawn` plus native child stdout passthrough; the MVP assumes child stdout is already ACP or JSONL when machine-readable output is required
+- stderr: debug output, human-readable logs, and runtime error messages only
