@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::io::{self, Write};
+use std::sync::mpsc::Sender;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -126,6 +127,60 @@ impl<D> EventEnvelope<D> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeEvent {
+    SpawnStarted(EventEnvelope<SpawnStartedData>),
+    SpawnCompleted(EventEnvelope<SpawnCompletedData>),
+    SpawnFailed(EventEnvelope<SpawnFailedData>),
+}
+
+pub trait RuntimeEventSink: Send {
+    fn handle(&mut self, event: &RuntimeEvent) -> Result<(), String>;
+}
+
+pub struct NoopEventSink;
+
+impl RuntimeEventSink for NoopEventSink {
+    fn handle(&mut self, _event: &RuntimeEvent) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+pub struct ChannelEventSink {
+    tx: Sender<RuntimeEvent>,
+}
+
+impl ChannelEventSink {
+    pub fn new(tx: Sender<RuntimeEvent>) -> Self {
+        Self { tx }
+    }
+}
+
+impl RuntimeEventSink for ChannelEventSink {
+    fn handle(&mut self, event: &RuntimeEvent) -> Result<(), String> {
+        self.tx.send(event.clone()).map_err(|error| error.to_string())
+    }
+}
+
+pub struct FanoutEventSink {
+    sinks: Vec<Box<dyn RuntimeEventSink>>,
+}
+
+impl FanoutEventSink {
+    pub fn new(sinks: Vec<Box<dyn RuntimeEventSink>>) -> Self {
+        Self { sinks }
+    }
+}
+
+impl RuntimeEventSink for FanoutEventSink {
+    fn handle(&mut self, event: &RuntimeEvent) -> Result<(), String> {
+        for sink in &mut self.sinks {
+            sink.handle(event)?;
+        }
+        Ok(())
+    }
+}
+
 pub fn current_timestamp() -> Result<String, TimestampError> {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
@@ -189,11 +244,8 @@ impl<W: Write> JsonlWriter<W> {
         Ok(())
     }
 
-    pub fn write_raw_line(&mut self, line: &str) -> Result<(), JsonlWriteError> {
-        self.writer
-            .write_all(line.as_bytes())
-            .map_err(JsonlWriteError::Io)?;
-        self.writer.write_all(b"\n").map_err(JsonlWriteError::Io)?;
+    pub fn write_raw_chunk(&mut self, chunk: &[u8]) -> Result<(), JsonlWriteError> {
+        self.writer.write_all(chunk).map_err(JsonlWriteError::Io)?;
         self.writer.flush().map_err(JsonlWriteError::Io)?;
         Ok(())
     }
@@ -202,12 +254,13 @@ impl<W: Write> JsonlWriter<W> {
 #[cfg(test)]
 mod tests {
     use std::io;
+    use std::sync::mpsc;
 
     use serde_json::{Value, json};
 
     use super::{
-        EventContext, EventEnvelope, EventKind, JsonlWriteError, JsonlWriter, ResultStatus,
-        SpawnResult,
+        ChannelEventSink, EventContext, EventEnvelope, EventKind, JsonlWriteError, JsonlWriter,
+        ResultStatus, RuntimeEvent, RuntimeEventSink, SpawnResult,
     };
 
     #[test]
@@ -242,16 +295,16 @@ mod tests {
     }
 
     #[test]
-    fn writes_raw_child_line_without_wrapping() {
+    fn writes_raw_child_chunk_without_wrapping() {
         let mut writer = JsonlWriter::new(Vec::new());
         writer
-            .write_raw_line(r#"{"event":"tool_called","payload":{"tool":"ls"}}"#)
-            .expect("raw line should write");
+            .write_raw_chunk(br#"{"event":"tool_called","payload":{"tool":"ls"}}"#)
+            .expect("raw chunk should write");
 
         let output = String::from_utf8(writer.into_inner()).expect("output should be UTF-8");
         assert_eq!(
             output,
-            "{\"event\":\"tool_called\",\"payload\":{\"tool\":\"ls\"}}\n"
+            "{\"event\":\"tool_called\",\"payload\":{\"tool\":\"ls\"}}"
         );
     }
 
@@ -319,6 +372,29 @@ mod tests {
             .expect_err("writer should surface io failure");
 
         assert!(matches!(error, JsonlWriteError::Io(_)));
+    }
+
+    #[test]
+    fn channel_sink_forwards_runtime_event() {
+        let (tx, rx) = mpsc::channel();
+        let mut sink = ChannelEventSink::new(tx);
+        let event = RuntimeEvent::SpawnStarted(EventEnvelope::new(
+            EventContext::new("run-1", Some("run-root")),
+            "2026-04-16T12:34:56Z",
+            EventKind::SpawnStarted,
+            super::SpawnStartedData {
+                spawn_id: "spawn-1".into(),
+                agent: "codex".into(),
+                command: vec!["codex".into(), "run".into()],
+                cwd: "/tmp".into(),
+                timeout_ms: None,
+                pid: None,
+            },
+        ));
+
+        sink.handle(&event).expect("event should send");
+
+        assert_eq!(rx.recv().expect("event should receive"), event);
     }
 
     struct FailingWriter;

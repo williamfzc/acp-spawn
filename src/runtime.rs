@@ -12,8 +12,9 @@ use crate::cancel::{CancelError, CancellationHandle};
 use crate::cli::RunArgs;
 use crate::config::{self, ConfigError};
 use crate::event::{
-    EventContext, EventEnvelope, EventKind, JsonlWriteError, JsonlWriter, ResultStatus,
-    SpawnCompletedData, SpawnFailedData, SpawnResult, SpawnStartedData, TimestampError,
+    EventContext, EventEnvelope, EventKind, JsonlWriteError, JsonlWriter, NoopEventSink,
+    ResultStatus, RuntimeEvent, RuntimeEventSink, SpawnCompletedData, SpawnFailedData,
+    SpawnResult, SpawnStartedData, TimestampError,
 };
 use crate::metadata::RunContext;
 use crate::process::{self, ProcessError, ProcessSpec, ProcessTermination};
@@ -53,6 +54,7 @@ pub enum RuntimeError {
     Process(ProcessError),
     EventTimestamp(TimestampError),
     EventWrite(JsonlWriteError),
+    EventSink(String),
     StderrWrite(io::Error),
     ChildExitedNonZero {
         agent: String,
@@ -110,6 +112,7 @@ impl fmt::Display for RuntimeError {
             Self::Process(error) => write!(f, "{error}"),
             Self::EventTimestamp(error) => write!(f, "{error}"),
             Self::EventWrite(error) => write!(f, "{error}"),
+            Self::EventSink(error) => write!(f, "failed to write side-channel event: {error}"),
             Self::StderrWrite(error) => write!(f, "failed to write stderr: {error}"),
             Self::ChildExitedNonZero {
                 agent,
@@ -230,12 +233,22 @@ pub fn run_with_io<W: Write, E: Write>(
     stdout: W,
     stderr: E,
 ) -> Result<RunOutcome, RuntimeError> {
+    run_with_event_sink(request, cancellation, stdout, stderr, NoopEventSink)
+}
+
+pub fn run_with_event_sink<W: Write, E: Write, S: RuntimeEventSink>(
+    request: RunRequest,
+    cancellation: &CancellationHandle,
+    stdout: W,
+    stderr: E,
+    event_sink: S,
+) -> Result<RunOutcome, RuntimeError> {
     let run = RunContext::from_environment_or_root();
     let timeout = request
         .timeout
         .unwrap_or_else(|| Duration::from_millis(DEFAULT_TIMEOUT_MS));
     let timeout_ms = duration_to_millis(timeout);
-    let mut emitter = RuntimeEmitter::new(run.clone(), stdout, stderr);
+    let mut emitter = RuntimeEmitter::new(run.clone(), stdout, stderr, event_sink);
 
     let cwd = match resolve_cwd(&request.cwd) {
         Ok(cwd) => cwd,
@@ -269,6 +282,26 @@ pub fn run_with_io<W: Write, E: Write>(
         termination_grace_period: Duration::from_millis(TERMINATION_GRACE_PERIOD_MS),
     };
 
+    let input = match request.input_file.as_ref() {
+        Some(input_path) => match File::open(input_path) {
+            Ok(input) => Some(input),
+            Err(error) => {
+                let error = RuntimeError::InputOpenFailed {
+                    path: input_path.clone(),
+                    reason: error.to_string(),
+                };
+                emitter.emit_failed(
+                    0,
+                    failure_result(&run, &error.to_string(), None),
+                    &error.to_string(),
+                    None,
+                )?;
+                return Err(error);
+            }
+        },
+        None => None,
+    };
+
     let mut running = match process::spawn(&spec) {
         Ok(running) => running,
         Err(error) => {
@@ -282,11 +315,7 @@ pub fn run_with_io<W: Write, E: Write>(
         }
     };
 
-    if let Some(input_path) = request.input_file.as_ref() {
-        let input = File::open(input_path).map_err(|error| RuntimeError::InputOpenFailed {
-            path: input_path.clone(),
-            reason: error.to_string(),
-        })?;
+    if let Some(input) = input {
         running.start_stdin_forwarder(input);
     }
 
@@ -301,8 +330,8 @@ pub fn run_with_io<W: Write, E: Write>(
     let emitter = RefCell::new(emitter);
     let output = running.wait_with_streaming(
         cancellation,
-        &mut |line| emitter.borrow_mut().passthrough_stdout_line(line),
-        &mut |line| emitter.borrow_mut().write_stderr_line(line),
+        &mut |chunk| emitter.borrow_mut().passthrough_stdout_chunk(chunk),
+        &mut |chunk| emitter.borrow_mut().write_stderr_chunk(chunk),
     )?;
     let mut emitter = emitter.into_inner();
     let duration_ms = duration_to_millis_u128(output.duration);
@@ -409,20 +438,22 @@ fn duration_to_millis_u128(duration: Duration) -> u128 {
     duration.as_millis()
 }
 
-struct RuntimeEmitter<W, E> {
+struct RuntimeEmitter<W, E, S> {
     context: EventContext,
     run: RunContext,
     stdout: JsonlWriter<W>,
     stderr: E,
+    event_sink: S,
 }
 
-impl<W: Write, E: Write> RuntimeEmitter<W, E> {
-    fn new(run: RunContext, stdout: W, stderr: E) -> Self {
+impl<W: Write, E: Write, S: RuntimeEventSink> RuntimeEmitter<W, E, S> {
+    fn new(run: RunContext, stdout: W, stderr: E, event_sink: S) -> Self {
         Self {
             context: EventContext::from_run(&run),
             run,
             stdout: JsonlWriter::new(stdout),
             stderr,
+            event_sink,
         }
     }
 
@@ -436,7 +467,8 @@ impl<W: Write, E: Write> RuntimeEmitter<W, E> {
     ) -> Result<(), RuntimeError> {
         let mut command = vec![agent.to_string()];
         command.extend(agent_args.iter().cloned());
-        self.write_event(
+        self.write_lifecycle_event(RuntimeEvent::SpawnStarted(EventEnvelope::now(
+            self.context.clone(),
             EventKind::SpawnStarted,
             SpawnStartedData {
                 spawn_id: self.run.spawn_id.clone(),
@@ -446,12 +478,12 @@ impl<W: Write, E: Write> RuntimeEmitter<W, E> {
                 timeout_ms: Some(timeout_ms),
                 pid,
             },
-        )
+        )?))
     }
 
-    fn passthrough_stdout_line(&mut self, line: &str) -> Result<(), String> {
+    fn passthrough_stdout_chunk(&mut self, chunk: &[u8]) -> Result<(), String> {
         self.stdout
-            .write_raw_line(line)
+            .write_raw_chunk(chunk)
             .map_err(|error| error.to_string())
     }
 
@@ -461,7 +493,8 @@ impl<W: Write, E: Write> RuntimeEmitter<W, E> {
         exit_code: i32,
         result: SpawnResult,
     ) -> Result<(), RuntimeError> {
-        self.write_event(
+        self.write_lifecycle_event(RuntimeEvent::SpawnCompleted(EventEnvelope::now(
+            self.context.clone(),
             EventKind::SpawnCompleted,
             SpawnCompletedData {
                 spawn_id: self.run.spawn_id.clone(),
@@ -469,7 +502,7 @@ impl<W: Write, E: Write> RuntimeEmitter<W, E> {
                 exit_code,
                 result,
             },
-        )
+        )?))
     }
 
     fn emit_failed(
@@ -479,7 +512,8 @@ impl<W: Write, E: Write> RuntimeEmitter<W, E> {
         reason: &str,
         exit_code: Option<i32>,
     ) -> Result<(), RuntimeError> {
-        self.write_event(
+        self.write_lifecycle_event(RuntimeEvent::SpawnFailed(EventEnvelope::now(
+            self.context.clone(),
             EventKind::SpawnFailed,
             SpawnFailedData {
                 spawn_id: self.run.spawn_id.clone(),
@@ -488,22 +522,25 @@ impl<W: Write, E: Write> RuntimeEmitter<W, E> {
                 exit_code,
                 result,
             },
-        )
+        )?))
     }
 
-    fn write_stderr_line(&mut self, line: &str) -> Result<(), String> {
-        writeln!(self.stderr, "{line}")
+    fn write_stderr_chunk(&mut self, chunk: &[u8]) -> Result<(), String> {
+        self.stderr
+            .write_all(chunk)
             .and_then(|_| self.stderr.flush())
             .map_err(|error| error.to_string())
     }
 
-    fn write_event<D: serde::Serialize>(
-        &mut self,
-        kind: EventKind,
-        data: D,
-    ) -> Result<(), RuntimeError> {
-        let event = EventEnvelope::now(self.context.clone(), kind, data)?;
-        self.stdout.write_event(&event)?;
+    fn write_lifecycle_event(&mut self, event: RuntimeEvent) -> Result<(), RuntimeError> {
+        match &event {
+            RuntimeEvent::SpawnStarted(envelope) => self.stdout.write_event(envelope)?,
+            RuntimeEvent::SpawnCompleted(envelope) => self.stdout.write_event(envelope)?,
+            RuntimeEvent::SpawnFailed(envelope) => self.stdout.write_event(envelope)?,
+        }
+        self.event_sink
+            .handle(&event)
+            .map_err(RuntimeError::EventSink)?;
         Ok(())
     }
 }
@@ -514,6 +551,7 @@ mod tests {
     use std::fs;
     use std::io::{self, Write};
     use std::path::PathBuf;
+    use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -521,9 +559,13 @@ mod tests {
     use serde_json::Value;
 
     use crate::cancel::CancellationHandle;
+    use crate::event::{ChannelEventSink, RuntimeEvent};
     use crate::metadata::{PARENT_RUN_ID_ENV, RUN_ID_ENV};
 
-    use super::{ACP_SPAWN_GOAL_ENV, RunContext, RunRequest, RuntimeError, run_with_io};
+    use super::{
+        ACP_SPAWN_GOAL_ENV, RunContext, RunRequest, RuntimeError, run_with_event_sink,
+        run_with_io,
+    };
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -569,6 +611,45 @@ printf 'stderr-line\n' >&2
         assert_eq!(events[2]["data"]["result"]["status"], "success");
         assert_eq!(outcome.result.status, crate::event::ResultStatus::Success);
         assert_eq!(stderr.contents(), "stderr-line\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_side_channel_receives_lifecycle_events_only() {
+        let cwd = create_temp_dir("runtime-side-channel");
+        let (tx, rx) = mpsc::channel();
+        let stdout = SharedBuffer::default();
+        let stderr = SharedBuffer::default();
+
+        run_with_event_sink(
+            RunRequest {
+                agent: "/bin/sh".into(),
+                agent_args: vec![
+                    "-c".into(),
+                    "printf '{\"event\":\"child_stdout\"}\\n'".into(),
+                ],
+                goal: "implement parser".into(),
+                cwd,
+                timeout: Some(Duration::from_millis(10_000)),
+                input_file: None,
+            },
+            &CancellationHandle::new(),
+            stdout.writer(),
+            stderr.writer(),
+            ChannelEventSink::new(tx),
+        )
+        .expect("run should succeed");
+
+        let received: Vec<RuntimeEvent> = rx.try_iter().collect();
+
+        assert_eq!(received.len(), 2);
+        assert!(matches!(received[0], RuntimeEvent::SpawnStarted(_)));
+        assert!(matches!(received[1], RuntimeEvent::SpawnCompleted(_)));
+
+        let stdout_events = parse_json_lines(&stdout.contents());
+        assert_eq!(stdout_events.len(), 3);
+        assert_eq!(stdout_events[1]["event"], "child_stdout");
+        assert_eq!(stderr.contents(), "");
     }
 
     #[cfg(unix)]
@@ -806,6 +887,34 @@ sleep 5
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["event"], "spawn_failed");
         assert!(matches!(error, RuntimeError::CwdDoesNotExist(_)));
+    }
+
+    #[test]
+    fn run_emits_failed_event_for_missing_input_before_spawn() {
+        let cwd = create_temp_dir("runtime-missing-input");
+        let stdout = SharedBuffer::default();
+        let stderr = SharedBuffer::default();
+
+        let error = run_with_io(
+            RunRequest {
+                agent: "/bin/sh".into(),
+                agent_args: vec!["-c".into(), "sleep 5".into()],
+                goal: "missing input".into(),
+                cwd,
+                timeout: Some(Duration::from_millis(5_000)),
+                input_file: Some(PathBuf::from("/definitely/not/a/real/input.jsonl")),
+            },
+            &CancellationHandle::new(),
+            stdout.writer(),
+            stderr.writer(),
+        )
+        .expect_err("run should fail");
+
+        let events = parse_json_lines(&stdout.contents());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event"], "spawn_failed");
+        assert_eq!(stderr.contents(), "");
+        assert!(matches!(error, RuntimeError::InputOpenFailed { .. }));
     }
 
     #[test]

@@ -2,7 +2,9 @@
 
 use std::ffi::OsString;
 use std::fmt;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -149,6 +151,13 @@ pub fn spawn(spec: &ProcessSpec) -> Result<RunningProcess, ProcessError> {
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0))
+                .map_err(std::io::Error::other)
+        });
+    }
 
     let mut child = command.spawn().map_err(|error| ProcessError::SpawnFailed {
         program: program.clone(),
@@ -218,8 +227,8 @@ impl RunningProcess {
     pub fn wait_with_streaming(
         mut self,
         cancellation: &CancellationHandle,
-        on_stdout_line: &mut dyn FnMut(&str) -> Result<(), String>,
-        on_stderr_line: &mut dyn FnMut(&str) -> Result<(), String>,
+        on_stdout_chunk: &mut dyn FnMut(&[u8]) -> Result<(), String>,
+        on_stderr_chunk: &mut dyn FnMut(&[u8]) -> Result<(), String>,
     ) -> Result<ProcessOutput, ProcessError> {
         let mut stdout_closed = false;
         let mut stderr_closed = false;
@@ -254,12 +263,12 @@ impl RunningProcess {
             }
 
             match self.receiver.recv_timeout(self.poll_interval) {
-                Ok(StreamMessage::Line(StreamKind::Stdout, line)) => on_stdout_line(&line)
+                Ok(StreamMessage::Chunk(StreamKind::Stdout, chunk)) => on_stdout_chunk(&chunk)
                     .map_err(|reason| ProcessError::ObserverFailed {
                         stream: "stdout",
                         reason,
                     })?,
-                Ok(StreamMessage::Line(StreamKind::Stderr, line)) => on_stderr_line(&line)
+                Ok(StreamMessage::Chunk(StreamKind::Stderr, chunk)) => on_stderr_chunk(&chunk)
                     .map_err(|reason| ProcessError::ObserverFailed {
                         stream: "stderr",
                         reason,
@@ -319,7 +328,7 @@ impl RunningProcess {
             thread::sleep(self.poll_interval);
         }
 
-        match self.child.kill() {
+        match kill_child_group(&mut self.child, &self.program) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => Ok(()),
             Err(error) => Err(ProcessError::KillFailed {
@@ -355,7 +364,7 @@ impl RunningProcess {
 
 #[derive(Debug)]
 enum StreamMessage {
-    Line(StreamKind, String),
+    Chunk(StreamKind, Vec<u8>),
     Closed(StreamKind),
     ReadError(StreamKind, String),
 }
@@ -381,11 +390,17 @@ fn spawn_reader<R: Read + Send + 'static>(
     sender: Sender<StreamMessage>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        let reader = BufReader::new(reader);
-        for line in reader.lines() {
-            match line {
-                Ok(line) => {
-                    if sender.send(StreamMessage::Line(kind, line)).is_err() {
+        let mut reader = BufReader::new(reader);
+        let mut buffer = [0_u8; 4096];
+
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(size) => {
+                    if sender
+                        .send(StreamMessage::Chunk(kind, buffer[..size].to_vec()))
+                        .is_err()
+                    {
                         return;
                     }
                 }
@@ -402,12 +417,27 @@ fn spawn_reader<R: Read + Send + 'static>(
 
 #[cfg(unix)]
 fn send_termination_signal(child: &mut Child, program: &str) -> Result<(), ProcessError> {
+    send_signal_to_child_group(child, program, nix::sys::signal::Signal::SIGTERM)
+}
+
+#[cfg(unix)]
+fn kill_child_group(child: &mut Child, program: &str) -> std::io::Result<()> {
+    send_signal_to_child_group(child, program, nix::sys::signal::Signal::SIGKILL)
+        .map_err(|error| std::io::Error::other(error.to_string()))
+}
+
+#[cfg(unix)]
+fn send_signal_to_child_group(
+    child: &mut Child,
+    program: &str,
+    signal: nix::sys::signal::Signal,
+) -> Result<(), ProcessError> {
     use nix::errno::Errno;
-    use nix::sys::signal::{Signal, kill};
+    use nix::sys::signal::kill;
     use nix::unistd::Pid;
 
-    let pid = Pid::from_raw(child.id() as i32);
-    match kill(pid, Signal::SIGTERM) {
+    let process_group = Pid::from_raw(-(child.id() as i32));
+    match kill(process_group, signal) {
         Ok(()) => Ok(()),
         Err(Errno::ESRCH) => Ok(()),
         Err(error) => Err(ProcessError::SignalFailed {
@@ -447,6 +477,7 @@ mod tests {
     use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -454,6 +485,12 @@ mod tests {
 
     use super::{ProcessError, ProcessSpec, ProcessTermination, spawn};
 
+    #[cfg(unix)]
+    use nix::errno::Errno;
+    #[cfg(unix)]
+    use nix::sys::signal::kill;
+    #[cfg(unix)]
+    use nix::unistd::Pid;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
@@ -497,19 +534,19 @@ printf 'stderr-marker\n' >&2
 "#,
         );
 
-        let mut stdout_lines = Vec::new();
-        let mut stderr_lines = Vec::new();
+        let mut stdout_bytes = Vec::new();
+        let mut stderr_bytes = Vec::new();
         let cancellation = CancellationHandle::new();
         let running = spawn(&base_spec(script.into(), cwd)).expect("spawn should succeed");
         let output = running
             .wait_with_streaming(
                 &cancellation,
-                &mut |line| {
-                    stdout_lines.push(line.to_string());
+                &mut |chunk| {
+                    stdout_bytes.extend_from_slice(chunk);
                     Ok(())
                 },
-                &mut |line| {
-                    stderr_lines.push(line.to_string());
+                &mut |chunk| {
+                    stderr_bytes.extend_from_slice(chunk);
                     Ok(())
                 },
             )
@@ -518,8 +555,11 @@ printf 'stderr-marker\n' >&2
         assert!(output.success);
         assert_eq!(output.exit_code, Some(0));
         assert_eq!(output.termination, ProcessTermination::Exited);
-        assert_eq!(stdout_lines, vec!["line-one", "line-two"]);
-        assert_eq!(stderr_lines, vec!["stderr-marker"]);
+        assert_eq!(
+            String::from_utf8(stdout_bytes).unwrap(),
+            "line-one\nline-two\n"
+        );
+        assert_eq!(String::from_utf8(stderr_bytes).unwrap(), "stderr-marker\n");
     }
 
     #[cfg(unix)]
@@ -559,15 +599,15 @@ printf '{"event":"stdin_echo","value":"%s"}\n' "$line"
         );
 
         let cancellation = CancellationHandle::new();
-        let mut stdout_lines = Vec::new();
+        let mut stdout_bytes = Vec::new();
         let mut running = spawn(&base_spec(script.into(), cwd)).expect("spawn should succeed");
         running.start_stdin_forwarder(std::io::Cursor::new(b"hello-from-stdin\n".to_vec()));
 
         let output = running
             .wait_with_streaming(
                 &cancellation,
-                &mut |line| {
-                    stdout_lines.push(line.to_string());
+                &mut |chunk| {
+                    stdout_bytes.extend_from_slice(chunk);
                     Ok(())
                 },
                 &mut |_| Ok(()),
@@ -576,8 +616,8 @@ printf '{"event":"stdin_echo","value":"%s"}\n' "$line"
 
         assert!(output.success);
         assert_eq!(
-            stdout_lines,
-            vec![r#"{"event":"stdin_echo","value":"hello-from-stdin"}"#]
+            String::from_utf8(stdout_bytes).unwrap(),
+            "{\"event\":\"stdin_echo\",\"value\":\"hello-from-stdin\"}\n"
         );
     }
 
@@ -611,6 +651,89 @@ sleep 5
             ProcessTermination::Cancelled {
                 reason: "cancelled by test".into(),
             }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_preserves_stdout_without_trailing_newline() {
+        let cwd = create_temp_dir("process-stdout-raw");
+        let script = create_script(
+            "no-newline.sh",
+            r#"#!/bin/sh
+printf 'no-newline'
+"#,
+        );
+
+        let cancellation = CancellationHandle::new();
+        let mut stdout_bytes = Vec::new();
+        let running = spawn(&base_spec(script.into(), cwd)).expect("spawn should succeed");
+        let output = running
+            .wait_with_streaming(
+                &cancellation,
+                &mut |chunk| {
+                    stdout_bytes.extend_from_slice(chunk);
+                    Ok(())
+                },
+                &mut |_| Ok(()),
+            )
+            .expect("wait should succeed");
+
+        assert!(output.success);
+        assert_eq!(stdout_bytes, b"no-newline");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_cancellation_terminates_detached_children_in_group() {
+        let cwd = create_temp_dir("process-cancel-group");
+        let script = create_script(
+            "group-cancel.sh",
+            r#"#!/bin/sh
+sleep 30 &
+printf '%s\n' "$!"
+wait
+"#,
+        );
+
+        let cancellation = CancellationHandle::new();
+        let cancellation_clone = cancellation.clone();
+        let spec = base_spec(script.into(), cwd);
+        let running = spawn(&spec).expect("spawn should succeed");
+        let grandchild_pid = Arc::new(Mutex::new(None));
+        let grandchild_pid_for_callback = Arc::clone(&grandchild_pid);
+        let output = running
+            .wait_with_streaming(
+                &cancellation,
+                &mut |chunk| {
+                    let pid = String::from_utf8_lossy(chunk)
+                        .trim()
+                        .parse::<i32>()
+                        .map_err(|error| error.to_string())?;
+                    *grandchild_pid_for_callback
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pid);
+                    cancellation_clone.cancel_with_reason("cancelled after child group started");
+                    Ok(())
+                },
+                &mut |_| Ok(()),
+            )
+            .expect("wait should finish");
+
+        assert_eq!(
+            output.termination,
+            ProcessTermination::Cancelled {
+                reason: "cancelled after child group started".into(),
+            }
+        );
+
+        let grandchild_pid = grandchild_pid
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .expect("grandchild pid should be captured");
+        assert!(
+            matches!(kill(Pid::from_raw(grandchild_pid), None), Err(Errno::ESRCH)),
+            "grandchild should not still be alive after timeout"
         );
     }
 
