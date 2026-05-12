@@ -12,36 +12,35 @@ Wrap any command with structured JSONL lifecycle events on stdout.
 
 Child stdout passes through untouched. Child stderr and runtime errors go to stderr.
 
-## Example
+## Example (success)
 
 ```bash
-$ acp-spawn run -- opencode acp
+$ acp-spawn run -- codex-acp
 ```
 
 ```json
-{"run_id":"run-000140c6-...","timestamp":"2026-05-12T16:03:26.232204Z","event":"spawn_started","data":{"spawn_id":"spawn-000140c6-...","agent":"opencode","command":["opencode","acp"],"cwd":"/Users/bytedance/workspace/github/acp-spawn/.","timeout_ms":300000,"pid":41104}}
-Agent Client Protocol commands
-...
-{"run_id":"run-000140c6-...","timestamp":"2026-05-12T16:03:27.720374Z","event":"spawn_completed","data":{"spawn_id":"spawn-000140c6-...","duration_ms":1488,"exit_code":0,"result":{"status":"success","summary":"agent 'opencode' completed successfully","run_id":"run-000140c6-...","exit_code":0}}}
+{"run_id":"run-0001578b-...","timestamp":"2026-05-12T17:15:30.685775Z","event":"spawn_started","data":{"spawn_id":"spawn-0001578b-...","agent":"codex-acp","command":["codex-acp"],"cwd":"/tmp","timeout_ms":300000,"pid":87949}}
+{"run_id":"run-0001578b-...","timestamp":"2026-05-12T17:15:31.066356Z","event":"spawn_completed","data":{"spawn_id":"spawn-0001578b-...","duration_ms":380,"exit_code":0,"result":{"status":"success","summary":"agent 'codex-acp' completed successfully","run_id":"run-0001578b-...","exit_code":0}}}
 ```
 
-On failure:
+## Example (failure)
 
 ```bash
-$ acp-spawn run -- opencode
+$ acp-spawn run -- gemini
 ```
 
 ```json
-{"run_id":"run-000140c6-...","timestamp":"2026-05-12T17:11:01.138355Z","event":"spawn_started","data":{"spawn_id":"spawn-000140c6-...","agent":"opencode","command":["opencode"],"cwd":"/Users/bytedance/workspace/github/acp-spawn/.","timeout_ms":300000,"pid":82197}}
-{"run_id":"run-000140c6-...","timestamp":"2026-05-12T17:11:01.480589Z","event":"spawn_failed","data":{"spawn_id":"spawn-000140c6-...","duration_ms":342,"reason":"child agent 'opencode' exited with code 1 (run_id=..., spawn_id=...)","exit_code":1,"result":{"status":"failed","summary":"child agent 'opencode' exited with code 1 (run_id=..., spawn_id=...)","run_id":"run-000140c6-...","error":"child agent 'opencode' exited with code 1 (run_id=..., spawn_id=...)","exit_code":1}}}
+{"run_id":"run-000159aa-...","timestamp":"2026-05-12T17:16:00.266457Z","event":"spawn_started","data":{"spawn_id":"spawn-000159aa-...","agent":"gemini","command":["gemini"],"cwd":"/tmp","timeout_ms":300000,"pid":88492}}
+{"run_id":"run-000159aa-...","timestamp":"2026-05-12T17:16:05.382974Z","event":"spawn_failed","data":{"spawn_id":"spawn-000159aa-...","duration_ms":5116,"reason":"received SIGTERM","exit_code":0,"result":{"status":"failed","summary":"received SIGTERM","run_id":"run-000159aa-...","error":"received SIGTERM","exit_code":0}}}
 ```
 
 ## Usage
 
 ```bash
 acp-spawn run -- opencode acp
-acp-spawn run -- opencode acp
 acp-spawn run -- claude-agent-acp
+acp-spawn run -- codex-acp
+acp-spawn run -- gemini
 ```
 
 Set a working directory:
@@ -59,7 +58,7 @@ RUN_ID=run-parent-123 acp-spawn run -- opencode acp
 Extract lifecycle events from the output:
 
 ```bash
-acp-spawn run -- opencode acp | jq -c 'select(.event == "spawn_started" or .event == "spawn_completed" or .event == "spawn_failed")'
+acp-spawn run -- codex-acp | jq -c 'select(.event == "spawn_started" or .event == "spawn_completed" or .event == "spawn_failed")'
 ```
 
 ## Build

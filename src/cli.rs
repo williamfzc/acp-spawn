@@ -72,8 +72,8 @@ mod tests {
 
     #[test]
     fn parses_single_command() {
-        let cli = Cli::try_parse_from(["acp-spawn", "run", "--", "codex"])
-            .expect("cli should parse");
+        let cli =
+            Cli::try_parse_from(["acp-spawn", "run", "--", "codex"]).expect("cli should parse");
 
         assert_eq!(
             cli.command,
@@ -86,15 +86,8 @@ mod tests {
 
     #[test]
     fn parses_command_with_flag_args() {
-        let cli = Cli::try_parse_from([
-            "acp-spawn",
-            "run",
-            "--",
-            "codex",
-            "run",
-            "--json",
-        ])
-        .expect("cli should parse");
+        let cli = Cli::try_parse_from(["acp-spawn", "run", "--", "codex", "run", "--json"])
+            .expect("cli should parse");
 
         assert_eq!(
             cli.command,
