@@ -208,7 +208,7 @@ impl TryFrom<RunArgs> for RunRequest {
             cwd: args
                 .cwd
                 .or_else(|| loaded.as_ref().map(|config| config.cwd.clone()))
-                .ok_or(RuntimeError::MissingRunField("cwd"))?,
+                .unwrap_or_else(|| PathBuf::from(".")),
             timeout: args
                 .timeout_ms
                 .or_else(|| loaded.as_ref().and_then(|config| config.timeout_ms))
@@ -971,7 +971,7 @@ sleep 5
             agent: None,
             agent_args: vec![],
             goal: Some("demo".into()),
-            cwd: Some(PathBuf::from(".")),
+            cwd: None,
             timeout_ms: None,
             input_file: None,
         })

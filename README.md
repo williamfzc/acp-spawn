@@ -1,8 +1,6 @@
 # acp-spawn
 
-`acp-spawn` is a small Rust CLI that runs a child agent (or any process) and emits ACP-friendly JSONL lifecycle events.
-
-It is intentionally a thin spawn runtime: a composable primitive that higher-level agents, skills, and orchestrators can call without taking on a lot of extra runtime concepts.
+`acp-spawn` is a debug tool for inspecting ACP agent invocations. Give it a prompt and an agent, and it will run the agent while printing the full ACP call lifecycle as JSONL — so you can see exactly what happens during the call without digging through logs or wrapping the agent yourself.
 
 ## What This Project Does
 
@@ -29,7 +27,7 @@ flowchart LR
     end
 ```
 
-The key idea is that `acp-spawn` supervises the child process and reports lifecycle events, but it does not reinterpret the child's stdout. That keeps the runtime small and lets downstream tools consume the child's native ACP or JSONL output directly.
+The key idea is that `acp-spawn` wraps the child process with supervision (timeouts, cancellation, run tracing) and emits lifecycle events, but it does not reinterpret the child's stdout. That keeps the tool focused on its job: you see the raw agent output, with lifecycle metadata injected as structured events you can filter with `jq`.
 
 ## Current Capabilities
 
@@ -43,17 +41,21 @@ The key idea is that `acp-spawn` supervises the child process and reports lifecy
 
 ## Scope
 
+`acp-spawn` is a single-purpose debug tool. It stays small so you can trust it to report what happens without getting in the way.
+
 Goals:
 
-- Provide a stable CLI primitive for spawning agents with lightweight run metadata.
-- Emit minimal, strict JSONL lifecycle events for machine consumption.
-- Preserve child stdout exactly as emitted (ACP-native passthrough).
+- Run any agent or command with a prompt and working directory.
+- Emit minimal, strict JSONL lifecycle events for machine inspection.
+- Preserve child stdout exactly as emitted — zero transformation.
+- Trace nested runs via `run_id` / `parent_run_id` propagation.
 
 Non-goals:
 
 - No trace storage, querying, aggregation, or UI.
-- No attempt to normalize non-ACP child stdout into ACP.
-- No orchestration layer (queues, scheduling, retries, concurrency policies).
+- No normalization of non-ACP child stdout into ACP.
+- No orchestration (queues, scheduling, retries, concurrency).
+- No command hijacking, shell integration, or global install magic.
 
 ## Quick Start
 

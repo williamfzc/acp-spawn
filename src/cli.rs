@@ -40,7 +40,7 @@ pub struct RunArgs {
     pub agent_args: Vec<String>,
 
     /// Goal or task description for the target agent.
-    #[arg(long)]
+    #[arg(long, visible_alias = "prompt")]
     pub goal: Option<String>,
 
     /// Working directory to run the child agent in.
