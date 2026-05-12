@@ -31,7 +31,6 @@ pub struct RunRequest {
     pub cwd: PathBuf,
     pub timeout: Option<Duration>,
     pub input_file: Option<PathBuf>,
-    pub forward_stdin: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,7 +214,6 @@ impl TryFrom<RunArgs> for RunRequest {
                 .or_else(|| loaded.as_ref().and_then(|config| config.timeout_ms))
                 .map(Duration::from_millis),
             input_file: args.input_file,
-            forward_stdin: args.forward_stdin,
         })
     }
 }
@@ -319,8 +317,6 @@ pub fn run_with_event_sink<W: Write, E: Write, S: RuntimeEventSink>(
 
     if let Some(input) = input {
         running.start_stdin_forwarder(input);
-    } else if request.forward_stdin {
-        running.start_stdin_forwarder(io::stdin());
     } else {
         running.close_stdin();
     }
@@ -597,7 +593,6 @@ printf 'stderr-line\n' >&2
                 cwd,
                 timeout: Some(Duration::from_millis(5_000)),
                 input_file: None,
-                forward_stdin: false,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -638,7 +633,6 @@ printf 'stderr-line\n' >&2
                 cwd,
                 timeout: Some(Duration::from_millis(10_000)),
                 input_file: None,
-                forward_stdin: false,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -680,7 +674,6 @@ printf 'stderr-line\n' >&2
                 cwd,
                 timeout: Some(Duration::from_millis(5_000)),
                 input_file: None,
-                forward_stdin: false,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -722,7 +715,6 @@ printf 'stderr-line\n' >&2
                 cwd,
                 timeout: Some(Duration::from_millis(200)),
                 input_file: None,
-                forward_stdin: false,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -760,7 +752,6 @@ printf '{"event":"run_check","run":"%s","parent":"%s"}\n' "$RUN_ID" "$PARENT_RUN
                 cwd,
                 timeout: Some(Duration::from_millis(5_000)),
                 input_file: None,
-                forward_stdin: false,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -797,7 +788,6 @@ exit 9
                 cwd,
                 timeout: Some(Duration::from_millis(5_000)),
                 input_file: None,
-                forward_stdin: false,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -841,7 +831,6 @@ sleep 5
                 cwd,
                 timeout: Some(Duration::from_millis(50)),
                 input_file: None,
-                forward_stdin: false,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -888,7 +877,6 @@ sleep 5
                 cwd,
                 timeout: Some(Duration::from_millis(5_000)),
                 input_file: None,
-                forward_stdin: false,
             },
             &cancellation,
             stdout.writer(),
@@ -919,7 +907,6 @@ sleep 5
                 cwd: PathBuf::from("/definitely/not/a/real/path"),
                 timeout: Some(Duration::from_millis(5_000)),
                 input_file: None,
-                forward_stdin: false,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -947,7 +934,6 @@ sleep 5
                 cwd,
                 timeout: Some(Duration::from_millis(5_000)),
                 input_file: Some(PathBuf::from("/definitely/not/a/real/input.jsonl")),
-                forward_stdin: false,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -988,7 +974,6 @@ sleep 5
             cwd: Some(PathBuf::from(".")),
             timeout_ms: None,
             input_file: None,
-            forward_stdin: false,
         })
         .expect_err("request should fail");
 
