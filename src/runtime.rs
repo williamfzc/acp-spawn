@@ -3,14 +3,11 @@
 use std::cell::RefCell;
 use std::ffi::OsString;
 use std::fmt;
-use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::cancel::{CancelError, CancellationHandle};
-use crate::cli::RunArgs;
-use crate::config::{self, ConfigError};
 use crate::event::{
     EventContext, EventEnvelope, EventKind, JsonlWriteError, JsonlWriter, NoopEventSink,
     ResultStatus, RuntimeEvent, RuntimeEventSink, SpawnCompletedData, SpawnFailedData, SpawnResult,
@@ -19,7 +16,6 @@ use crate::event::{
 use crate::metadata::RunContext;
 use crate::process::{self, ProcessError, ProcessSpec, ProcessTermination};
 
-pub const ACP_SPAWN_GOAL_ENV: &str = "ACP_SPAWN_GOAL";
 pub const DEFAULT_TIMEOUT_MS: u64 = 300_000;
 const TERMINATION_GRACE_PERIOD_MS: u64 = 500;
 
@@ -27,10 +23,8 @@ const TERMINATION_GRACE_PERIOD_MS: u64 = 500;
 pub struct RunRequest {
     pub agent: String,
     pub agent_args: Vec<String>,
-    pub goal: String,
     pub cwd: PathBuf,
     pub timeout: Option<Duration>,
-    pub input_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,13 +38,7 @@ pub enum RuntimeError {
     MissingCurrentDirectory,
     CwdDoesNotExist(PathBuf),
     CwdIsNotDirectory(PathBuf),
-    MissingRunField(&'static str),
-    InputOpenFailed {
-        path: PathBuf,
-        reason: String,
-    },
     CancelSetup(CancelError),
-    Config(ConfigError),
     Process(ProcessError),
     EventTimestamp(TimestampError),
     EventWrite(JsonlWriteError),
@@ -97,18 +85,7 @@ impl fmt::Display for RuntimeError {
                     path.display()
                 )
             }
-            Self::MissingRunField(field) => {
-                write!(f, "missing required run setting: {field}")
-            }
-            Self::InputOpenFailed { path, reason } => {
-                write!(
-                    f,
-                    "failed to open input file '{}': {reason}",
-                    path.display()
-                )
-            }
             Self::CancelSetup(error) => write!(f, "{error}"),
-            Self::Config(error) => write!(f, "{error}"),
             Self::Process(error) => write!(f, "{error}"),
             Self::EventTimestamp(error) => write!(f, "{error}"),
             Self::EventWrite(error) => write!(f, "{error}"),
@@ -161,12 +138,6 @@ impl From<ProcessError> for RuntimeError {
     }
 }
 
-impl From<ConfigError> for RuntimeError {
-    fn from(value: ConfigError) -> Self {
-        Self::Config(value)
-    }
-}
-
 impl From<TimestampError> for RuntimeError {
     fn from(value: TimestampError) -> Self {
         Self::EventTimestamp(value)
@@ -176,45 +147,6 @@ impl From<TimestampError> for RuntimeError {
 impl From<JsonlWriteError> for RuntimeError {
     fn from(value: JsonlWriteError) -> Self {
         Self::EventWrite(value)
-    }
-}
-
-impl TryFrom<RunArgs> for RunRequest {
-    type Error = RuntimeError;
-
-    fn try_from(args: RunArgs) -> Result<Self, Self::Error> {
-        let loaded = match args.config.as_ref() {
-            Some(path) => Some(config::load_run_config(path, args.profile.as_deref())?),
-            None => None,
-        };
-
-        Ok(Self {
-            agent: args
-                .agent
-                .or_else(|| loaded.as_ref().map(|config| config.agent.clone()))
-                .ok_or(RuntimeError::MissingRunField("agent"))?,
-            agent_args: if args.agent_args.is_empty() {
-                loaded
-                    .as_ref()
-                    .map(|config| config.agent_args.clone())
-                    .unwrap_or_default()
-            } else {
-                args.agent_args
-            },
-            goal: args
-                .goal
-                .or_else(|| loaded.as_ref().map(|config| config.goal.clone()))
-                .ok_or(RuntimeError::MissingRunField("goal"))?,
-            cwd: args
-                .cwd
-                .or_else(|| loaded.as_ref().map(|config| config.cwd.clone()))
-                .unwrap_or_else(|| PathBuf::from(".")),
-            timeout: args
-                .timeout_ms
-                .or_else(|| loaded.as_ref().and_then(|config| config.timeout_ms))
-                .map(Duration::from_millis),
-            input_file: args.input_file,
-        })
     }
 }
 
@@ -277,29 +209,9 @@ pub fn run_with_event_sink<W: Write, E: Write, S: RuntimeEventSink>(
         program: OsString::from(&request.agent),
         args: request.agent_args.iter().map(OsString::from).collect(),
         cwd: cwd.clone(),
-        env: child_process_env(&request.goal, &run),
+        env: run.as_child_process_env(),
         timeout: Some(timeout),
         termination_grace_period: Duration::from_millis(TERMINATION_GRACE_PERIOD_MS),
-    };
-
-    let input = match request.input_file.as_ref() {
-        Some(input_path) => match File::open(input_path) {
-            Ok(input) => Some(input),
-            Err(error) => {
-                let error = RuntimeError::InputOpenFailed {
-                    path: input_path.clone(),
-                    reason: error.to_string(),
-                };
-                emitter.emit_failed(
-                    0,
-                    failure_result(&run, &error.to_string(), None),
-                    &error.to_string(),
-                    None,
-                )?;
-                return Err(error);
-            }
-        },
-        None => None,
     };
 
     let mut running = match process::spawn(&spec) {
@@ -315,11 +227,7 @@ pub fn run_with_event_sink<W: Write, E: Write, S: RuntimeEventSink>(
         }
     };
 
-    if let Some(input) = input {
-        running.start_stdin_forwarder(input);
-    } else {
-        running.close_stdin();
-    }
+    running.close_stdin();
 
     emitter.emit_started(
         &request.agent,
@@ -403,12 +311,6 @@ fn failure_result(run: &RunContext, summary: &str, exit_code: Option<i32>) -> Sp
         error: Some(summary.to_string()),
         exit_code,
     }
-}
-
-fn child_process_env(goal: &str, run: &RunContext) -> Vec<(String, String)> {
-    let mut env = run.as_child_process_env();
-    env.push((ACP_SPAWN_GOAL_ENV.to_string(), goal.to_string()));
-    env
 }
 
 fn resolve_cwd(cwd: &Path) -> Result<PathBuf, RuntimeError> {
@@ -562,11 +464,9 @@ mod tests {
 
     use crate::cancel::CancellationHandle;
     use crate::event::{ChannelEventSink, RuntimeEvent};
-    use crate::metadata::{PARENT_RUN_ID_ENV, RUN_ID_ENV};
+    use crate::metadata::RUN_ID_ENV;
 
-    use super::{
-        ACP_SPAWN_GOAL_ENV, RunContext, RunRequest, RuntimeError, run_with_event_sink, run_with_io,
-    };
+    use super::{RunRequest, RuntimeError, run_with_event_sink, run_with_io};
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -589,10 +489,8 @@ printf 'stderr-line\n' >&2
             RunRequest {
                 agent: script.to_string_lossy().into_owned(),
                 agent_args: vec![],
-                goal: "implement parser".into(),
                 cwd,
-                timeout: Some(Duration::from_millis(5_000)),
-                input_file: None,
+                timeout: None,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -629,10 +527,8 @@ printf 'stderr-line\n' >&2
                     "-c".into(),
                     "printf '{\"event\":\"child_stdout\"}\\n'".into(),
                 ],
-                goal: "implement parser".into(),
                 cwd,
-                timeout: Some(Duration::from_millis(10_000)),
-                input_file: None,
+                timeout: None,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -670,10 +566,8 @@ printf 'stderr-line\n' >&2
                     "first".into(),
                     "second".into(),
                 ],
-                goal: "verify args".into(),
                 cwd,
-                timeout: Some(Duration::from_millis(5_000)),
-                input_file: None,
+                timeout: None,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -711,10 +605,8 @@ printf 'stderr-line\n' >&2
                     "-c".into(),
                     "cat >/dev/null; printf '{\"event\":\"stdin_closed\"}\\n'".into(),
                 ],
-                goal: "stdin closed".into(),
                 cwd,
-                timeout: Some(Duration::from_millis(200)),
-                input_file: None,
+                timeout: None,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -748,10 +640,8 @@ printf '{"event":"run_check","run":"%s","parent":"%s"}\n' "$RUN_ID" "$PARENT_RUN
             RunRequest {
                 agent: script.to_string_lossy().into_owned(),
                 agent_args: vec![],
-                goal: "inherit".into(),
                 cwd,
-                timeout: Some(Duration::from_millis(5_000)),
-                input_file: None,
+                timeout: None,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -784,10 +674,8 @@ exit 9
             RunRequest {
                 agent: script.to_string_lossy().into_owned(),
                 agent_args: vec![],
-                goal: "fail".into(),
                 cwd,
-                timeout: Some(Duration::from_millis(5_000)),
-                input_file: None,
+                timeout: None,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -827,10 +715,8 @@ sleep 5
             RunRequest {
                 agent: script.to_string_lossy().into_owned(),
                 agent_args: vec![],
-                goal: "timeout".into(),
                 cwd,
                 timeout: Some(Duration::from_millis(50)),
-                input_file: None,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -873,10 +759,8 @@ sleep 5
             RunRequest {
                 agent: script.to_string_lossy().into_owned(),
                 agent_args: vec![],
-                goal: "cancel".into(),
                 cwd,
-                timeout: Some(Duration::from_millis(5_000)),
-                input_file: None,
+                timeout: None,
             },
             &cancellation,
             stdout.writer(),
@@ -903,10 +787,8 @@ sleep 5
             RunRequest {
                 agent: "codex".into(),
                 agent_args: vec![],
-                goal: "implement parser".into(),
                 cwd: PathBuf::from("/definitely/not/a/real/path"),
-                timeout: Some(Duration::from_millis(5_000)),
-                input_file: None,
+                timeout: None,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -918,66 +800,6 @@ sleep 5
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["event"], "spawn_failed");
         assert!(matches!(error, RuntimeError::CwdDoesNotExist(_)));
-    }
-
-    #[test]
-    fn run_emits_failed_event_for_missing_input_before_spawn() {
-        let cwd = create_temp_dir("runtime-missing-input");
-        let stdout = SharedBuffer::default();
-        let stderr = SharedBuffer::default();
-
-        let error = run_with_io(
-            RunRequest {
-                agent: "/bin/sh".into(),
-                agent_args: vec!["-c".into(), "sleep 5".into()],
-                goal: "missing input".into(),
-                cwd,
-                timeout: Some(Duration::from_millis(5_000)),
-                input_file: Some(PathBuf::from("/definitely/not/a/real/input.jsonl")),
-            },
-            &CancellationHandle::new(),
-            stdout.writer(),
-            stderr.writer(),
-        )
-        .expect_err("run should fail");
-
-        let events = parse_json_lines(&stdout.contents());
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["event"], "spawn_failed");
-        assert_eq!(stderr.contents(), "");
-        assert!(matches!(error, RuntimeError::InputOpenFailed { .. }));
-    }
-
-    #[test]
-    fn child_process_env_contains_goal_and_run_fields() {
-        let run = RunContext {
-            run_id: "run-1".into(),
-            parent_run_id: Some("run-root".into()),
-            spawn_id: "spawn-1".into(),
-        };
-
-        let env = super::child_process_env("ship it", &run);
-
-        assert!(env.contains(&(ACP_SPAWN_GOAL_ENV.to_string(), "ship it".into())));
-        assert!(env.contains(&(RUN_ID_ENV.to_string(), "run-1".into())));
-        assert!(env.contains(&(PARENT_RUN_ID_ENV.to_string(), "run-root".into())));
-    }
-
-    #[test]
-    fn try_from_requires_agent_after_config_merge() {
-        let error = RunRequest::try_from(crate::cli::RunArgs {
-            config: None,
-            profile: None,
-            agent: None,
-            agent_args: vec![],
-            goal: Some("demo".into()),
-            cwd: None,
-            timeout_ms: None,
-            input_file: None,
-        })
-        .expect_err("request should fail");
-
-        assert!(matches!(error, RuntimeError::MissingRunField("agent")));
     }
 
     #[cfg(unix)]

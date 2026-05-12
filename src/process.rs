@@ -240,27 +240,25 @@ impl RunningProcess {
         let mut forced_termination: Option<ProcessTermination> = None;
 
         loop {
-            if status.is_none() {
-                if forced_termination.is_none() {
-                    if let Some(timeout) = self.timeout {
-                        if self.started_at.elapsed() >= timeout {
-                            self.terminate_child()?;
-                            forced_termination = Some(ProcessTermination::TimedOut);
-                        }
-                    }
-                }
-
-                if forced_termination.is_none() && cancellation.is_cancelled() {
-                    self.terminate_child()?;
-                    forced_termination = Some(ProcessTermination::Cancelled {
-                        reason: cancellation
-                            .reason()
-                            .unwrap_or_else(|| "cancelled".to_string()),
-                    });
-                }
-
-                status = self.try_wait()?;
+            if status.is_none()
+                && forced_termination.is_none()
+                && let Some(timeout) = self.timeout
+                && self.started_at.elapsed() >= timeout
+            {
+                self.terminate_child()?;
+                forced_termination = Some(ProcessTermination::TimedOut);
             }
+
+            if forced_termination.is_none() && cancellation.is_cancelled() {
+                self.terminate_child()?;
+                forced_termination = Some(ProcessTermination::Cancelled {
+                    reason: cancellation
+                        .reason()
+                        .unwrap_or_else(|| "cancelled".to_string()),
+                });
+            }
+
+            status = self.try_wait()?;
 
             if status.is_some() && stdout_closed && stderr_closed {
                 break;
@@ -357,12 +355,12 @@ impl RunningProcess {
     }
 
     fn join_stdin_forwarder(&mut self) -> Result<(), ProcessError> {
-        if let Some(handle) = self.stdin_forward_handle.take() {
-            if handle.is_finished() {
-                handle
-                    .join()
-                    .map_err(|_| ProcessError::JoinFailed { stream: "stdin" })?;
-            }
+        if let Some(handle) = self.stdin_forward_handle.take()
+            && handle.is_finished()
+        {
+            handle
+                .join()
+                .map_err(|_| ProcessError::JoinFailed { stream: "stdin" })?;
         }
         Ok(())
     }

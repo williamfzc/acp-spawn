@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "acp-spawn", version, about = "ACP spawn runtime CLI skeleton")]
+#[command(name = "acp-spawn", version, about = "ACP spawn runtime CLI")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -13,43 +13,19 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum Commands {
-    /// Run a child agent with the provided goal and working directory.
+    /// Run a command and emit its output wrapped with JSONL lifecycle events.
     Run(RunArgs),
 }
 
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct RunArgs {
-    /// Optional config file that defines the target command and runtime settings.
-    #[arg(long, value_name = "FILE")]
-    pub config: Option<PathBuf>,
-
-    /// Optional profile name inside the config file.
-    #[arg(long, requires = "config")]
-    pub profile: Option<String>,
-
-    /// Optional file whose contents are forwarded to child stdin.
-    #[arg(long, value_name = "FILE")]
-    pub input_file: Option<PathBuf>,
-
-    /// Agent executable or logical name to run.
-    #[arg(long)]
-    pub agent: Option<String>,
-
-    /// Additional argument to pass to the child process. Can be specified multiple times.
-    #[arg(long = "agent-arg", allow_hyphen_values = true)]
-    pub agent_args: Vec<String>,
-
-    /// Goal or task description for the target agent.
-    #[arg(long, visible_alias = "prompt")]
-    pub goal: Option<String>,
-
-    /// Working directory to run the child agent in.
+    /// Working directory to run the child process in.
     #[arg(long, value_name = "DIR")]
     pub cwd: Option<PathBuf>,
 
-    /// Timeout for the child process in milliseconds.
-    #[arg(long, value_name = "MILLISECONDS")]
-    pub timeout_ms: Option<u64>,
+    /// Command and its arguments (after `--`).
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 1..)]
+    pub command: Vec<String>,
 }
 
 #[cfg(test)]
@@ -59,115 +35,72 @@ mod tests {
     use super::{Cli, Commands, RunArgs};
 
     #[test]
-    fn parses_run_command() {
+    fn parses_command_and_args() {
         let cli = Cli::try_parse_from([
             "acp-spawn",
             "run",
-            "--config",
-            "./examples/spawn-profiles.toml",
-            "--profile",
-            "opencode-acp",
-            "--agent",
-            "codex",
-            "--agent-arg",
+            "--cwd",
+            "./repo",
+            "--",
+            "opencode",
+            "acp",
+        ])
+        .expect("cli should parse");
+
+        assert_eq!(
+            cli.command,
+            Commands::Run(RunArgs {
+                cwd: Some("./repo".into()),
+                command: vec!["opencode".into(), "acp".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn parses_command_without_cwd() {
+        let cli = Cli::try_parse_from(["acp-spawn", "run", "--", "echo", "hello"])
+            .expect("cli should parse");
+
+        assert_eq!(
+            cli.command,
+            Commands::Run(RunArgs {
+                cwd: None,
+                command: vec!["echo".into(), "hello".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn parses_single_command() {
+        let cli = Cli::try_parse_from(["acp-spawn", "run", "--", "codex"])
+            .expect("cli should parse");
+
+        assert_eq!(
+            cli.command,
+            Commands::Run(RunArgs {
+                cwd: None,
+                command: vec!["codex".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn parses_command_with_flag_args() {
+        let cli = Cli::try_parse_from([
+            "acp-spawn",
             "run",
-            "--agent-arg",
+            "--",
+            "codex",
+            "run",
             "--json",
-            "--goal",
-            "implement parser",
-            "--cwd",
-            "./repo",
-            "--timeout-ms",
-            "5000",
         ])
         .expect("cli should parse");
 
         assert_eq!(
             cli.command,
             Commands::Run(RunArgs {
-                config: Some("./examples/spawn-profiles.toml".into()),
-                profile: Some("opencode-acp".into()),
-                input_file: None,
-                agent: Some("codex".into()),
-                agent_args: vec!["run".into(), "--json".into()],
-                goal: Some("implement parser".into()),
-                cwd: Some("./repo".into()),
-                timeout_ms: Some(5000),
-            })
-        );
-    }
-
-    #[test]
-    fn allows_deferred_validation_for_config_driven_runs() {
-        let cli = Cli::try_parse_from(["acp-spawn", "run"]).expect("cli should parse");
-
-        assert_eq!(
-            cli.command,
-            Commands::Run(RunArgs {
-                config: None,
-                profile: None,
-                input_file: None,
-                agent: None,
-                agent_args: vec![],
-                goal: None,
                 cwd: None,
-                timeout_ms: None,
-            })
-        );
-    }
-
-    #[test]
-    fn accepts_empty_agent_args() {
-        let cli = Cli::try_parse_from([
-            "acp-spawn",
-            "run",
-            "--agent",
-            "codex",
-            "--goal",
-            "implement parser",
-            "--cwd",
-            "./repo",
-        ])
-        .expect("cli should parse");
-
-        assert_eq!(
-            cli.command,
-            Commands::Run(RunArgs {
-                config: None,
-                profile: None,
-                input_file: None,
-                agent: Some("codex".into()),
-                agent_args: vec![],
-                goal: Some("implement parser".into()),
-                cwd: Some("./repo".into()),
-                timeout_ms: None,
-            })
-        );
-    }
-
-    #[test]
-    fn parses_config_only_run_command() {
-        let cli = Cli::try_parse_from([
-            "acp-spawn",
-            "run",
-            "--config",
-            "./examples/spawn-profiles.toml",
-            "--profile",
-            "opencode-acp",
-        ])
-        .expect("cli should parse");
-
-        assert_eq!(
-            cli.command,
-            Commands::Run(RunArgs {
-                config: Some("./examples/spawn-profiles.toml".into()),
-                profile: Some("opencode-acp".into()),
-                input_file: None,
-                agent: None,
-                agent_args: vec![],
-                goal: None,
-                cwd: None,
-                timeout_ms: None,
+                command: vec!["codex".into(), "run".into(), "--json".into()],
             })
         );
     }

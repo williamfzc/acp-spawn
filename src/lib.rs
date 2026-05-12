@@ -2,7 +2,6 @@
 
 pub mod cancel;
 pub mod cli;
-pub mod config;
 pub mod event;
 pub mod metadata;
 pub mod process;

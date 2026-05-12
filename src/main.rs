@@ -1,5 +1,6 @@
 //! Starts the ACP spawn runtime CLI binary.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use acp_spawn::cli::{Cli, Commands};
@@ -21,10 +22,20 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Commands::Run(args) => {
-            let request = RunRequest::try_from(args)?;
+            let (agent, agent_args) = split_command(&args.command);
+            let request = RunRequest {
+                agent,
+                agent_args,
+                cwd: args.cwd.unwrap_or_else(|| PathBuf::from(".")),
+                timeout: None,
+            };
             runtime::run(request)?;
         }
     }
 
     Ok(())
+}
+
+fn split_command(raw: &[String]) -> (String, Vec<String>) {
+    (raw[0].clone(), raw[1..].to_vec())
 }
