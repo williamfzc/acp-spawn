@@ -158,7 +158,9 @@ impl ChannelEventSink {
 
 impl RuntimeEventSink for ChannelEventSink {
     fn handle(&mut self, event: &RuntimeEvent) -> Result<(), String> {
-        self.tx.send(event.clone()).map_err(|error| error.to_string())
+        self.tx
+            .send(event.clone())
+            .map_err(|error| error.to_string())
     }
 }
 

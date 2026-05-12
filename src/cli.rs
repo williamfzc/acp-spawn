@@ -15,6 +15,12 @@ pub struct Cli {
 pub enum Commands {
     /// Run a child agent with the provided goal and working directory.
     Run(RunArgs),
+    /// Install command hijack shims for supported agent commands.
+    Install(InstallArgs),
+    /// Show current command hijack status.
+    Status,
+    /// Remove command hijack shims and shell integration.
+    Uninstall,
 }
 
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
@@ -50,13 +56,24 @@ pub struct RunArgs {
     /// Timeout for the child process in milliseconds.
     #[arg(long, value_name = "MILLISECONDS")]
     pub timeout_ms: Option<u64>,
+
+    /// Forward current stdin to the child process unchanged.
+    #[arg(long)]
+    pub forward_stdin: bool,
+}
+
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct InstallArgs {
+    /// Command name to hijack. When omitted, installs the default supported commands.
+    #[arg(long = "command", value_name = "NAME")]
+    pub commands: Vec<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use clap::Parser;
 
-    use super::{Cli, Commands, RunArgs};
+    use super::{Cli, Commands, InstallArgs, RunArgs};
 
     #[test]
     fn parses_run_command() {
@@ -93,6 +110,7 @@ mod tests {
                 goal: Some("implement parser".into()),
                 cwd: Some("./repo".into()),
                 timeout_ms: Some(5000),
+                forward_stdin: false,
             })
         );
     }
@@ -112,6 +130,7 @@ mod tests {
                 goal: None,
                 cwd: None,
                 timeout_ms: None,
+                forward_stdin: false,
             })
         );
     }
@@ -141,6 +160,7 @@ mod tests {
                 goal: Some("implement parser".into()),
                 cwd: Some("./repo".into()),
                 timeout_ms: None,
+                forward_stdin: false,
             })
         );
     }
@@ -168,6 +188,27 @@ mod tests {
                 goal: None,
                 cwd: None,
                 timeout_ms: None,
+                forward_stdin: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_install_command_with_selected_commands() {
+        let cli = Cli::try_parse_from([
+            "acp-spawn",
+            "install",
+            "--command",
+            "codex",
+            "--command",
+            "claude",
+        ])
+        .expect("cli should parse");
+
+        assert_eq!(
+            cli.command,
+            Commands::Install(InstallArgs {
+                commands: vec!["codex".into(), "claude".into()],
             })
         );
     }

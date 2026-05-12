@@ -224,6 +224,10 @@ impl RunningProcess {
         }));
     }
 
+    pub fn close_stdin(&mut self) {
+        let _ = self.stdin.take();
+    }
+
     pub fn wait_with_streaming(
         mut self,
         cancellation: &CancellationHandle,
@@ -354,9 +358,11 @@ impl RunningProcess {
 
     fn join_stdin_forwarder(&mut self) -> Result<(), ProcessError> {
         if let Some(handle) = self.stdin_forward_handle.take() {
-            handle
-                .join()
-                .map_err(|_| ProcessError::JoinFailed { stream: "stdin" })?;
+            if handle.is_finished() {
+                handle
+                    .join()
+                    .map_err(|_| ProcessError::JoinFailed { stream: "stdin" })?;
+            }
         }
         Ok(())
     }
@@ -476,10 +482,11 @@ mod tests {
     use std::env;
     use std::ffi::OsString;
     use std::fs;
+    use std::io::{self, Read};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::thread;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use crate::cancel::CancellationHandle;
 
@@ -623,6 +630,35 @@ printf '{"event":"stdin_echo","value":"%s"}\n' "$line"
 
     #[cfg(unix)]
     #[test]
+    fn process_does_not_wait_for_slow_stdin_reader_after_child_exits() {
+        let cwd = create_temp_dir("process-stdin-exit");
+        let script = create_script(
+            "exit-immediately.sh",
+            r#"#!/bin/sh
+exit 0
+"#,
+        );
+
+        let cancellation = CancellationHandle::new();
+        let mut running = spawn(&base_spec(script.into(), cwd)).expect("spawn should succeed");
+        running.start_stdin_forwarder(SlowEofReader {
+            delay: Duration::from_secs(10),
+        });
+
+        let started = Instant::now();
+        let output = running
+            .wait_with_streaming(&cancellation, &mut |_| Ok(()), &mut |_| Ok(()))
+            .expect("wait should succeed");
+
+        assert!(output.success);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "wait should not block on stdin reader after child exits"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn process_cancels_when_requested() {
         let cwd = create_temp_dir("process-cancel");
         let script = create_script(
@@ -759,5 +795,16 @@ wait
         let path = env::temp_dir().join(format!("acp-spawn-{prefix}-{unique}"));
         fs::create_dir_all(&path).expect("temp dir should be created");
         path
+    }
+
+    struct SlowEofReader {
+        delay: Duration,
+    }
+
+    impl Read for SlowEofReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            thread::sleep(self.delay);
+            Ok(0)
+        }
     }
 }

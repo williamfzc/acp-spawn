@@ -13,8 +13,8 @@ use crate::cli::RunArgs;
 use crate::config::{self, ConfigError};
 use crate::event::{
     EventContext, EventEnvelope, EventKind, JsonlWriteError, JsonlWriter, NoopEventSink,
-    ResultStatus, RuntimeEvent, RuntimeEventSink, SpawnCompletedData, SpawnFailedData,
-    SpawnResult, SpawnStartedData, TimestampError,
+    ResultStatus, RuntimeEvent, RuntimeEventSink, SpawnCompletedData, SpawnFailedData, SpawnResult,
+    SpawnStartedData, TimestampError,
 };
 use crate::metadata::RunContext;
 use crate::process::{self, ProcessError, ProcessSpec, ProcessTermination};
@@ -31,6 +31,7 @@ pub struct RunRequest {
     pub cwd: PathBuf,
     pub timeout: Option<Duration>,
     pub input_file: Option<PathBuf>,
+    pub forward_stdin: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,6 +215,7 @@ impl TryFrom<RunArgs> for RunRequest {
                 .or_else(|| loaded.as_ref().and_then(|config| config.timeout_ms))
                 .map(Duration::from_millis),
             input_file: args.input_file,
+            forward_stdin: args.forward_stdin,
         })
     }
 }
@@ -317,6 +319,10 @@ pub fn run_with_event_sink<W: Write, E: Write, S: RuntimeEventSink>(
 
     if let Some(input) = input {
         running.start_stdin_forwarder(input);
+    } else if request.forward_stdin {
+        running.start_stdin_forwarder(io::stdin());
+    } else {
+        running.close_stdin();
     }
 
     emitter.emit_started(
@@ -563,8 +569,7 @@ mod tests {
     use crate::metadata::{PARENT_RUN_ID_ENV, RUN_ID_ENV};
 
     use super::{
-        ACP_SPAWN_GOAL_ENV, RunContext, RunRequest, RuntimeError, run_with_event_sink,
-        run_with_io,
+        ACP_SPAWN_GOAL_ENV, RunContext, RunRequest, RuntimeError, run_with_event_sink, run_with_io,
     };
 
     #[cfg(unix)]
@@ -592,6 +597,7 @@ printf 'stderr-line\n' >&2
                 cwd,
                 timeout: Some(Duration::from_millis(5_000)),
                 input_file: None,
+                forward_stdin: false,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -632,6 +638,7 @@ printf 'stderr-line\n' >&2
                 cwd,
                 timeout: Some(Duration::from_millis(10_000)),
                 input_file: None,
+                forward_stdin: false,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -673,6 +680,7 @@ printf 'stderr-line\n' >&2
                 cwd,
                 timeout: Some(Duration::from_millis(5_000)),
                 input_file: None,
+                forward_stdin: false,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -693,6 +701,37 @@ printf 'stderr-line\n' >&2
         );
         assert_eq!(events[1]["event"], "argv_check");
         assert_eq!(events[1]["args"], serde_json::json!(["first", "second"]));
+        assert_eq!(stderr.contents(), "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_closes_child_stdin_when_no_input_is_forwarded() {
+        let cwd = create_temp_dir("runtime-stdin-closed");
+        let stdout = SharedBuffer::default();
+        let stderr = SharedBuffer::default();
+
+        run_with_io(
+            RunRequest {
+                agent: "/bin/sh".into(),
+                agent_args: vec![
+                    "-c".into(),
+                    "cat >/dev/null; printf '{\"event\":\"stdin_closed\"}\\n'".into(),
+                ],
+                goal: "stdin closed".into(),
+                cwd,
+                timeout: Some(Duration::from_millis(200)),
+                input_file: None,
+                forward_stdin: false,
+            },
+            &CancellationHandle::new(),
+            stdout.writer(),
+            stderr.writer(),
+        )
+        .expect("run should finish after child receives EOF");
+
+        let events = parse_json_lines(&stdout.contents());
+        assert_eq!(events[1]["event"], "stdin_closed");
         assert_eq!(stderr.contents(), "");
     }
 
@@ -721,6 +760,7 @@ printf '{"event":"run_check","run":"%s","parent":"%s"}\n' "$RUN_ID" "$PARENT_RUN
                 cwd,
                 timeout: Some(Duration::from_millis(5_000)),
                 input_file: None,
+                forward_stdin: false,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -757,6 +797,7 @@ exit 9
                 cwd,
                 timeout: Some(Duration::from_millis(5_000)),
                 input_file: None,
+                forward_stdin: false,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -800,6 +841,7 @@ sleep 5
                 cwd,
                 timeout: Some(Duration::from_millis(50)),
                 input_file: None,
+                forward_stdin: false,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -846,6 +888,7 @@ sleep 5
                 cwd,
                 timeout: Some(Duration::from_millis(5_000)),
                 input_file: None,
+                forward_stdin: false,
             },
             &cancellation,
             stdout.writer(),
@@ -876,6 +919,7 @@ sleep 5
                 cwd: PathBuf::from("/definitely/not/a/real/path"),
                 timeout: Some(Duration::from_millis(5_000)),
                 input_file: None,
+                forward_stdin: false,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -903,6 +947,7 @@ sleep 5
                 cwd,
                 timeout: Some(Duration::from_millis(5_000)),
                 input_file: Some(PathBuf::from("/definitely/not/a/real/input.jsonl")),
+                forward_stdin: false,
             },
             &CancellationHandle::new(),
             stdout.writer(),
@@ -943,6 +988,7 @@ sleep 5
             cwd: Some(PathBuf::from(".")),
             timeout_ms: None,
             input_file: None,
+            forward_stdin: false,
         })
         .expect_err("request should fail");
 
