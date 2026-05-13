@@ -1,0 +1,93 @@
+install.sh
+  25f7ce51f9c251d9 62,71-73,75,78,80,86 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a0481e46e1a5e663d27d02c","tool_type":"agent","tool_id":"SearchReplace","line_ranges":[{"Single":62},{"Range":[71,73]},{"Single":75},{"Single":78},{"Single":80},{"Single":86}]}]}
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "fecebe9c4cb8079311c6f5b4804c78e82e52c8c2",
+  "prompts": {
+    "25f7ce51f9c251d9": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a0463516e1a5e663d27ce42",
+        "model": "glm-5.1__dev"
+      },
+      "human_author": "williamfzc <178894043@qq.com>",
+      "messages": [],
+      "total_additions": 8,
+      "total_deletions": 7,
+      "accepted_lines": 8,
+      "overriden_lines": 0
+    }
+  },
+  "attestation_metadata": {
+    "install.sh": [
+      {
+        "hash": "25f7ce51f9c251d9",
+        "line_ranges": [
+          {
+            "Single": 62
+          },
+          {
+            "Range": [
+              71,
+              73
+            ]
+          },
+          {
+            "Single": 75
+          },
+          {
+            "Single": 78
+          },
+          {
+            "Single": 80
+          },
+          {
+            "Single": 86
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a0481e46e1a5e663d27d02c",
+            "tool_type": "agent",
+            "tool_id": "SearchReplace",
+            "line_ranges": [
+              {
+                "Single": 62
+              },
+              {
+                "Range": [
+                  71,
+                  73
+                ]
+              },
+              {
+                "Single": 75
+              },
+              {
+                "Single": 78
+              },
+              {
+                "Single": 80
+              },
+              {
+                "Single": 86
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote_transcripts": {
+    "25f7ce51f9c251d9": {
+      "tool": "trae",
+      "conversation_id": "6a0463516e1a5e663d27ce42",
+      "session_id": "6a0463516e1a5e663d27ce42",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    }
+  }
+}
