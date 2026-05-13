@@ -59,7 +59,7 @@ download() {
 }
 
 main() {
-    local os arch version dest_dir tmpdir archive binary_path
+    local os arch version dest_dir archive binary_path
 
     os="$(detect_os)"
     arch="$(detect_arch)"
@@ -68,21 +68,22 @@ main() {
 
     info "acp-spawn ${version}  os=${os}  arch=${arch}  dest=${dest_dir}"
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "${tmpdir}"' EXIT
+    TMPDIR="$(mktemp -d)"
+    export TMPDIR
+    trap 'rm -rf "${TMPDIR}"' EXIT
 
-    archive="$(download "${version}" "${os}" "${arch}" "${tmpdir}")"
+    archive="$(download "${version}" "${os}" "${arch}" "${TMPDIR}")"
 
     info "Extracting ..."
-    tar xzf "${archive}" -C "${tmpdir}"
+    tar xzf "${archive}" -C "${TMPDIR}"
 
-    if [ ! -f "${tmpdir}/${BINARY}" ]; then
+    if [ ! -f "${TMPDIR}/${BINARY}" ]; then
         error "Binary '${BINARY}' not found in archive."
         exit 1
     fi
 
     mkdir -p "${dest_dir}"
-    install -m 755 "${tmpdir}/${BINARY}" "${dest_dir}/${BINARY}"
+    install -m 755 "${TMPDIR}/${BINARY}" "${dest_dir}/${BINARY}"
 
     binary_path="${dest_dir}/${BINARY}"
     info "Installed acp-spawn to ${binary_path}"
