@@ -9,7 +9,26 @@ env:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_os: linux
+            artifact_arch: x86_64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_os: linux
+            artifact_arch: aarch64
+          - target: x86_64-apple-darwin
+            os: macos-13
+            artifact_os: macos
+            artifact_arch: x86_64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact_os: macos
+            artifact_arch: aarch64
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: write
     steps:
@@ -18,20 +37,32 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install aarch64 linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
       - name: Package binary
         run: |
-          cd target/release
-          tar czf acp-spawn-linux-x86_64.tar.gz acp-spawn
-          sha256sum acp-spawn-linux-x86_64.tar.gz > acp-spawn-linux-x86_64.tar.gz.sha256
+          ARTIFACT_NAME=acp-spawn-${{ matrix.artifact_os }}-${{ matrix.artifact_arch }}.tar.gz
+          cd target/${{ matrix.target }}/release
+          tar czf ${ARTIFACT_NAME} acp-spawn
+          shasum -a 256 ${ARTIFACT_NAME} > ${ARTIFACT_NAME}.sha256
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/acp-spawn-linux-x86_64.tar.gz
+          files: |
+            target/${{ matrix.target }}/release/acp-spawn-${{ matrix.artifact_os }}-${{ matrix.artifact_arch }}.tar.gz
+            target/${{ matrix.target }}/release/acp-spawn-${{ matrix.artifact_os }}-${{ matrix.artifact_arch }}.tar.gz.sha256
           generate_release_notes: true
