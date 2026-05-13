@@ -28,6 +28,7 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
                 agent_args,
                 cwd: args.cwd.unwrap_or_else(|| PathBuf::from(".")),
                 timeout: None,
+                prompt: args.prompt,
             };
             runtime::run(request)?;
         }

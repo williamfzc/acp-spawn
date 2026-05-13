@@ -1,5 +1,6 @@
 //! Exposes the ACP spawn runtime building blocks.
 
+pub mod acp;
 pub mod cancel;
 pub mod cli;
 pub mod event;

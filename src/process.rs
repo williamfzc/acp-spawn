@@ -6,7 +6,7 @@ use std::io::{BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -44,7 +44,9 @@ pub enum ProcessTermination {
 pub struct RunningProcess {
     child: Child,
     stdin: Option<ChildStdin>,
-    receiver: Receiver<StreamMessage>,
+    stdout: Option<BufReader<ChildStdout>>,
+    sender: Sender<StreamMessage>,
+    receiver: Option<Receiver<StreamMessage>>,
     stdout_handle: Option<JoinHandle<()>>,
     stderr_handle: Option<JoinHandle<()>>,
     stdin_forward_handle: Option<JoinHandle<()>>,
@@ -175,14 +177,15 @@ pub fn spawn(spec: &ProcessSpec) -> Result<RunningProcess, ProcessError> {
         .ok_or(ProcessError::MissingPipe { stream: "stderr" })?;
 
     let (tx, rx) = mpsc::channel();
-    let stdout_handle = spawn_reader(stdout, StreamKind::Stdout, tx.clone());
-    let stderr_handle = spawn_reader(stderr, StreamKind::Stderr, tx);
+    let stderr_handle = spawn_reader(stderr, StreamKind::Stderr, tx.clone());
 
     Ok(RunningProcess {
         child,
         stdin,
-        receiver: rx,
-        stdout_handle: Some(stdout_handle),
+        stdout: Some(BufReader::new(stdout)),
+        sender: tx.clone(),
+        receiver: Some(rx),
+        stdout_handle: None,
         stderr_handle: Some(stderr_handle),
         stdin_forward_handle: None,
         timeout: spec.timeout,
@@ -196,6 +199,21 @@ pub fn spawn(spec: &ProcessSpec) -> Result<RunningProcess, ProcessError> {
 impl RunningProcess {
     pub fn pid(&self) -> u32 {
         self.child.id()
+    }
+
+    pub fn take_stdout_reader(&mut self) -> Option<BufReader<ChildStdout>> {
+        self.stdout.take()
+    }
+
+    pub fn return_stdout_reader(&mut self, reader: BufReader<ChildStdout>) {
+        self.stdout = Some(reader);
+    }
+
+    pub fn start_stdout_reader(&mut self) {
+        let Some(stdout) = self.stdout.take() else {
+            return;
+        };
+        self.stdout_handle = Some(spawn_reader(stdout, StreamKind::Stdout, self.sender.clone()));
     }
 
     pub fn start_stdin_forwarder<R: Read + Send + 'static>(&mut self, input: R) {
@@ -224,6 +242,24 @@ impl RunningProcess {
         }));
     }
 
+    pub fn write_stdin(&mut self, data: &[u8]) -> Result<(), ProcessError> {
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Err(ProcessError::MissingPipe {
+                stream: "stdin",
+            });
+        };
+        stdin.write_all(data).map_err(|error| ProcessError::ObserverFailed {
+            stream: "stdin",
+            reason: error.to_string(),
+        })?;
+        stdin
+            .flush()
+            .map_err(|error| ProcessError::ObserverFailed {
+                stream: "stdin",
+                reason: error.to_string(),
+            })
+    }
+
     pub fn close_stdin(&mut self) {
         let _ = self.stdin.take();
     }
@@ -234,6 +270,10 @@ impl RunningProcess {
         on_stdout_chunk: &mut dyn FnMut(&[u8]) -> Result<(), String>,
         on_stderr_chunk: &mut dyn FnMut(&[u8]) -> Result<(), String>,
     ) -> Result<ProcessOutput, ProcessError> {
+        self.start_stdout_reader();
+        let receiver = self.receiver.take().ok_or(ProcessError::MissingPipe {
+            stream: "receiver",
+        })?;
         let mut stdout_closed = false;
         let mut stderr_closed = false;
         let mut status: Option<ExitStatus> = None;
@@ -264,7 +304,7 @@ impl RunningProcess {
                 break;
             }
 
-            match self.receiver.recv_timeout(self.poll_interval) {
+            match receiver.recv_timeout(self.poll_interval) {
                 Ok(StreamMessage::Chunk(StreamKind::Stdout, chunk)) => on_stdout_chunk(&chunk)
                     .map_err(|reason| ProcessError::ObserverFailed {
                         stream: "stdout",

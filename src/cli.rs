@@ -23,6 +23,10 @@ pub struct RunArgs {
     #[arg(long, value_name = "DIR")]
     pub cwd: Option<PathBuf>,
 
+    /// Prompt text to send to the child process via ACP protocol.
+    #[arg(long, value_name = "TEXT")]
+    pub prompt: Option<String>,
+
     /// Command and its arguments (after `--`).
     #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 1..)]
     pub command: Vec<String>,
@@ -51,6 +55,7 @@ mod tests {
             cli.command,
             Commands::Run(RunArgs {
                 cwd: Some("./repo".into()),
+                prompt: None,
                 command: vec!["opencode".into(), "acp".into()],
             })
         );
@@ -65,6 +70,7 @@ mod tests {
             cli.command,
             Commands::Run(RunArgs {
                 cwd: None,
+                prompt: None,
                 command: vec!["echo".into(), "hello".into()],
             })
         );
@@ -79,6 +85,7 @@ mod tests {
             cli.command,
             Commands::Run(RunArgs {
                 cwd: None,
+                prompt: None,
                 command: vec!["codex".into()],
             })
         );
@@ -93,6 +100,7 @@ mod tests {
             cli.command,
             Commands::Run(RunArgs {
                 cwd: None,
+                prompt: None,
                 command: vec!["codex".into(), "run".into(), "--json".into()],
             })
         );

@@ -1,65 +1,78 @@
 # acp-spawn
 
-Wrap any command with structured JSONL lifecycle events on stdout.
+Wrap any ACP agent with structured JSONL lifecycle events on stdout.
 
 ## What it does
 
-`acp-spawn` runs a child process and emits lifecycle events to stdout as JSONL, interleaved with the child's own stdout output:
+`acp-spawn` runs an ACP agent and emits lifecycle events to stdout as JSONL, interleaved with the agent's own stdout output:
 
-1. **`spawn_started`** — child process launched, includes `run_id`, `spawn_id`, command, cwd, timeout, pid
-2. **`spawn_completed`** — child exited with code 0
-3. **`spawn_failed`** — child exited non-zero, timed out, or was cancelled
+1. **`spawn_started`** — agent launched, includes `run_id`, `spawn_id`, command, cwd, timeout, pid
+2. **`spawn_completed`** — agent exited with code 0
+3. **`spawn_failed`** — agent exited non-zero, timed out, or was cancelled
 
-Child stdout passes through untouched. Child stderr and runtime errors go to stderr.
+Agent stdout passes through untouched. Agent stderr and runtime errors go to stderr.
 
-## Example (success)
+## Quick start
+
+Send a prompt to an ACP agent and watch its output as JSONL:
 
 ```bash
-$ acp-spawn run -- codex-acp
+acp-spawn run --prompt "say hello" -- opencode acp serve
 ```
 
 ```json
-{"run_id":"run-0001578b-...","timestamp":"2026-05-12T17:15:30.685775Z","event":"spawn_started","data":{"spawn_id":"spawn-0001578b-...","agent":"codex-acp","command":["codex-acp"],"cwd":"/tmp","timeout_ms":300000,"pid":87949}}
-{"run_id":"run-0001578b-...","timestamp":"2026-05-12T17:15:31.066356Z","event":"spawn_completed","data":{"spawn_id":"spawn-0001578b-...","duration_ms":380,"exit_code":0,"result":{"status":"success","summary":"agent 'codex-acp' completed successfully","run_id":"run-0001578b-...","exit_code":0}}}
-```
-
-## Example (failure)
-
-```bash
-$ acp-spawn run -- gemini
-```
-
-```json
-{"run_id":"run-000159aa-...","timestamp":"2026-05-12T17:16:00.266457Z","event":"spawn_started","data":{"spawn_id":"spawn-000159aa-...","agent":"gemini","command":["gemini"],"cwd":"/tmp","timeout_ms":300000,"pid":88492}}
-{"run_id":"run-000159aa-...","timestamp":"2026-05-12T17:16:05.382974Z","event":"spawn_failed","data":{"spawn_id":"spawn-000159aa-...","duration_ms":5116,"reason":"received SIGTERM","exit_code":0,"result":{"status":"failed","summary":"received SIGTERM","run_id":"run-000159aa-...","error":"received SIGTERM","exit_code":0}}}
+{"run_id":"run-0001253b-...","event":"spawn_started","data":{"spawn_id":"spawn-0001253b-...","agent":"opencode","command":["opencode","acp","serve"],...}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"bf76e3d9-...","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"Hello","type":"text"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"bf76e3d9-...","update":{"sessionUpdate":"agent_message_chunk","content":{"text":", I'm ready to help","type":"text"}}}}
+{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}
+{"run_id":"run-0001253b-...","event":"spawn_completed","data":{"duration_ms":5432,"exit_code":0,...}}
 ```
 
 ## Usage
 
+Run an agent with a prompt:
+
 ```bash
-acp-spawn run -- opencode acp
-acp-spawn run -- claude-agent-acp
-acp-spawn run -- codex-acp
-acp-spawn run -- gemini
+acp-spawn run --prompt "fix the bug" -- opencode acp serve
+acp-spawn run --prompt "say hello" -- opencode acp
+acp-spawn run --prompt "say hello" -- codex-acp
+acp-spawn run --prompt "say hello" -- claude-agent-acp
+```
+
+Run an agent without a prompt (just wrap its lifecycle):
+
+```bash
+acp-spawn run -- opencode acp serve
 ```
 
 Set a working directory:
 
 ```bash
-acp-spawn run --cwd /path/to/project -- opencode acp
+acp-spawn run --cwd /path/to/project --prompt "review the code" -- opencode acp serve
 ```
 
 Link to a parent run by setting `RUN_ID` in the environment — the child will receive `PARENT_RUN_ID`:
 
 ```bash
-RUN_ID=run-parent-123 acp-spawn run -- opencode acp
+RUN_ID=run-parent-123 acp-spawn run --prompt "do the task" -- opencode acp serve
 ```
 
 Extract lifecycle events from the output:
 
 ```bash
-acp-spawn run -- codex-acp | jq -c 'select(.event == "spawn_started" or .event == "spawn_completed" or .event == "spawn_failed")'
+acp-spawn run --prompt "say hello" -- opencode acp serve | jq -c 'select(.event == "spawn_started" or .event == "spawn_completed" or .event == "spawn_failed")'
 ```
+
+## How --prompt works
+
+When you pass `--prompt`, acp-spawn performs the full ACP handshake before streaming output:
+
+1. Sends `initialize` → reads response
+2. Sends `session/new` → extracts `sessionId`
+3. Sends `session/prompt` with your text
+4. Streams the agent's output as JSONL until it finishes
+
+Without `--prompt`, acp-spawn just wraps the child process lifecycle and passes through stdout.
 
 ## Build
 
