@@ -213,7 +213,11 @@ impl RunningProcess {
         let Some(stdout) = self.stdout.take() else {
             return;
         };
-        self.stdout_handle = Some(spawn_reader(stdout, StreamKind::Stdout, self.sender.clone()));
+        self.stdout_handle = Some(spawn_reader(
+            stdout,
+            StreamKind::Stdout,
+            self.sender.clone(),
+        ));
     }
 
     pub fn start_stdin_forwarder<R: Read + Send + 'static>(&mut self, input: R) {
@@ -244,20 +248,18 @@ impl RunningProcess {
 
     pub fn write_stdin(&mut self, data: &[u8]) -> Result<(), ProcessError> {
         let Some(stdin) = self.stdin.as_mut() else {
-            return Err(ProcessError::MissingPipe {
-                stream: "stdin",
-            });
+            return Err(ProcessError::MissingPipe { stream: "stdin" });
         };
-        stdin.write_all(data).map_err(|error| ProcessError::ObserverFailed {
-            stream: "stdin",
-            reason: error.to_string(),
-        })?;
         stdin
-            .flush()
+            .write_all(data)
             .map_err(|error| ProcessError::ObserverFailed {
                 stream: "stdin",
                 reason: error.to_string(),
-            })
+            })?;
+        stdin.flush().map_err(|error| ProcessError::ObserverFailed {
+            stream: "stdin",
+            reason: error.to_string(),
+        })
     }
 
     pub fn close_stdin(&mut self) {
@@ -271,9 +273,10 @@ impl RunningProcess {
         on_stderr_chunk: &mut dyn FnMut(&[u8]) -> Result<(), String>,
     ) -> Result<ProcessOutput, ProcessError> {
         self.start_stdout_reader();
-        let receiver = self.receiver.take().ok_or(ProcessError::MissingPipe {
-            stream: "receiver",
-        })?;
+        let receiver = self
+            .receiver
+            .take()
+            .ok_or(ProcessError::MissingPipe { stream: "receiver" })?;
         let mut stdout_closed = false;
         let mut stderr_closed = false;
         let mut status: Option<ExitStatus> = None;

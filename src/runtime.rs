@@ -230,18 +230,21 @@ pub fn run_with_event_sink<W: Write, E: Write, S: RuntimeEventSink>(
     };
 
     if let Some(ref prompt_text) = request.prompt {
-        let mut stdout_reader = running
-            .take_stdout_reader()
-            .ok_or(RuntimeError::Process(ProcessError::MissingPipe { stream: "stdout" }))?;
+        let mut stdout_reader = running.take_stdout_reader().ok_or(RuntimeError::Process(
+            ProcessError::MissingPipe { stream: "stdout" },
+        ))?;
 
         running.write_stdin(&acp::initialize_message())?;
-        let init_result = acp::read_response(&mut stdout_reader, 1)
-            .map_err(|e| RuntimeError::Process(ProcessError::ObserverFailed {
+        let init_result = acp::read_response(&mut stdout_reader, 1).map_err(|e| {
+            RuntimeError::Process(ProcessError::ObserverFailed {
                 stream: "stdout",
                 reason: format!("initialize handshake failed: {e}"),
-            }))?;
+            })
+        })?;
         if init_result.response.get("error").is_some() {
-            let msg = init_result.response["error"]["message"].as_str().unwrap_or("unknown error");
+            let msg = init_result.response["error"]["message"]
+                .as_str()
+                .unwrap_or("unknown error");
             return Err(RuntimeError::Process(ProcessError::ObserverFailed {
                 stream: "stdout",
                 reason: format!("initialize rejected by agent: {msg}"),
@@ -249,33 +252,40 @@ pub fn run_with_event_sink<W: Write, E: Write, S: RuntimeEventSink>(
         }
 
         running.write_stdin(&acp::session_new_message(&cwd.display().to_string()))?;
-        let session_result = acp::read_response(&mut stdout_reader, 2)
-            .map_err(|e| RuntimeError::Process(ProcessError::ObserverFailed {
+        let session_result = acp::read_response(&mut stdout_reader, 2).map_err(|e| {
+            RuntimeError::Process(ProcessError::ObserverFailed {
                 stream: "stdout",
                 reason: format!("session/new handshake failed: {e}"),
-            }))?;
+            })
+        })?;
         if session_result.response.get("error").is_some() {
-            let msg = session_result.response["error"]["message"].as_str().unwrap_or("unknown error");
+            let msg = session_result.response["error"]["message"]
+                .as_str()
+                .unwrap_or("unknown error");
             return Err(RuntimeError::Process(ProcessError::ObserverFailed {
                 stream: "stdout",
                 reason: format!("session/new rejected by agent: {msg}"),
             }));
         }
-        let session_id = acp::extract_session_id(&session_result.response)
-            .map_err(|e| RuntimeError::Process(ProcessError::ObserverFailed {
+        let session_id = acp::extract_session_id(&session_result.response).map_err(|e| {
+            RuntimeError::Process(ProcessError::ObserverFailed {
                 stream: "stdout",
                 reason: e,
-            }))?;
+            })
+        })?;
 
         running.write_stdin(&acp::session_prompt_message(&session_id, prompt_text))?;
 
-        let prompt_result = acp::read_response(&mut stdout_reader, 3)
-            .map_err(|e| RuntimeError::Process(ProcessError::ObserverFailed {
+        let prompt_result = acp::read_response(&mut stdout_reader, 3).map_err(|e| {
+            RuntimeError::Process(ProcessError::ObserverFailed {
                 stream: "stdout",
                 reason: format!("session/prompt failed: {e}"),
-            }))?;
+            })
+        })?;
         if prompt_result.response.get("error").is_some() {
-            let msg = prompt_result.response["error"]["message"].as_str().unwrap_or("unknown error");
+            let msg = prompt_result.response["error"]["message"]
+                .as_str()
+                .unwrap_or("unknown error");
             return Err(RuntimeError::Process(ProcessError::ObserverFailed {
                 stream: "stdout",
                 reason: format!("session/prompt rejected by agent: {msg}"),
