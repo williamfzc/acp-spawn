@@ -1,211 +1,146 @@
 ---
 name: acp-spawn
-description: Run and trace ACP agent invocations. Use when the user wants to run an agent with tracing, observe agent behavior, inspect lifecycle events, trace run_id/spawn_id relationships, or mentions "acp-spawn", "spawn", or "ACP". Also use when the user needs to understand what happens during an agent call or wants to see the raw ACP lifecycle as JSONL.
+description: Run an ACP agent with a prompt and capture its full output as JSONL. Use when the user wants to run an agent, trace an agent invocation, inspect lifecycle events, debug ACP protocol behavior, or mentions "acp-spawn", "spawn", or "ACP".
 ---
 
 # acp-spawn
 
-A skill for running and tracing ACP (Agent Communication Protocol) invocations using `acp-spawn`. This skill helps you run agents with full lifecycle tracing, analyze JSONL output, and understand nested run relationships.
+A CLI tool that wraps any ACP agent and emits structured lifecycle events while passing through all agent output as JSONL.
 
 ## What acp-spawn Does
 
-`acp-spawn` wraps any agent or command and emits structured lifecycle events while preserving the child's stdout exactly. This gives you visibility into:
-- When a spawn starts and completes
-- The `run_id`, `spawn_id`, and `parent_run_id` relationships for nested runs
-- Raw child stdout passthrough for ACP/JSONL inspection
-- Timeout and cancellation behavior
+`acp-spawn` runs an ACP agent, optionally sends a prompt via the ACP protocol handshake, and streams the full output (including thinking, tool calls, and responses) as JSONL on stdout.
 
-## Common Workflows
-
-### Run an Agent with Debugging
-
-Use `acp-spawn run` to execute an agent and capture the full lifecycle:
+## Quick Start
 
 ```bash
-acp-spawn run \
-  --agent <path-to-agent> \
-  --goal "<what the agent should do>" \
-  --cwd <working-directory> \
-  --timeout-ms <timeout>
+acp-spawn run --prompt "say hello" -- opencode acp
 ```
 
-The output will be JSONL lines:
-1. `spawn_started` - lifecycle event with metadata
-2. Child stdout lines (passed through unchanged)
-3. `spawn_completed` or `spawn_failed` - final lifecycle event
+This starts `opencode acp`, performs the ACP handshake, sends the prompt, and streams all output as JSONL until the agent finishes.
 
-### Run from Config
+## Usage
 
-For reusable targets, use a TOML config:
+### Run an agent with a prompt
 
 ```bash
-acp-spawn run --config spawn-profiles.toml [--profile <name>]
+acp-spawn run --prompt "fix the bug" -- opencode acp
+acp-spawn run --prompt "say hello" -- codex-acp
+acp-spawn run --prompt "say hello" -- claude-agent-acp
 ```
 
-### Analyze Output
+### Run an agent without a prompt
 
-Extract specific information with `jq`:
+Just wraps the child process lifecycle and passes through stdout:
 
 ```bash
-# Get run identifiers
-acp-spawn run ... | jq -r 'select(.event=="spawn_started") | "run_id=\(.run_id) spawn_id=\(.data.spawn_id)"'
-
-# Get only child output (filter out lifecycle events)
-acp-spawn run ... | jq -c 'select(.event | startswith("spawn_") | not)'
-
-# Check for failures
-acp-spawn run ... | jq -c 'select(.event=="spawn_failed")'
+acp-spawn run -- opencode acp
 ```
 
-## Config File Format
+### Set a working directory
 
-Create a `spawn-profiles.toml`:
-
-```toml
-[run]
-agent = "/path/to/agent"
-agent_args = ["arg1", "arg2"]
-goal = "default goal description"
-cwd = "."
-timeout_ms = 30000
-
-[profiles.custom]
-agent = "/path/to/other-agent"
-agent_args = []
-goal = "custom goal"
-cwd = "/other/path"
-timeout_ms = 60000
+```bash
+acp-spawn run --cwd /path/to/project --prompt "review the code" -- opencode acp
 ```
 
-- `[run]` is the default profile (used when `--profile` is omitted)
-- `[profiles.<name>]` are named profiles selectable with `--profile`
-- Relative `cwd` is resolved relative to the config file location
+### Link to a parent run
 
-## Lifecycle Events
+Set `RUN_ID` in the environment — the child will receive `PARENT_RUN_ID`:
 
-### spawn_started
-Emitted when the child process starts:
+```bash
+RUN_ID=run-parent-123 acp-spawn run --prompt "do the task" -- opencode acp
+```
+
+### Filter output with jq
+
+```bash
+# Extract only lifecycle events
+acp-spawn run --prompt "say hello" -- opencode acp | jq -c 'select(.event)'
+
+# Extract only agent output (filter out lifecycle events)
+acp-spawn run --prompt "say hello" -- opencode acp | jq -c 'select(.event | not)'
+
+# Get the final result
+acp-spawn run --prompt "say hello" -- opencode acp | jq -s 'last | select(.event)'
+```
+
+## How --prompt Works
+
+When you pass `--prompt`, acp-spawn performs the full ACP handshake before streaming output:
+
+1. Sends `initialize` → reads response
+2. Sends `session/new` → extracts `sessionId`
+3. Sends `session/prompt` with your text → reads response
+4. All three handshake responses and any interleaved notifications are passed through to stdout
+5. Streams the agent's remaining output as JSONL until it finishes
+
+Without `--prompt`, acp-spawn just wraps the child process lifecycle and passes through stdout.
+
+## CLI Reference
+
+| Flag | Description |
+|------|-------------|
+| `--prompt <TEXT>` | Prompt text to send via ACP protocol handshake. |
+| `--cwd <DIR>` | Working directory. Defaults to `.`. |
+| `-- <command> [args...]` | The agent command and its arguments (required). |
+
+## Output Format
+
+`acp-spawn` writes JSONL to stdout. Every line is valid JSON on its own.
+
+### Lifecycle events (generated by acp-spawn)
+
+**spawn_started** — emitted when the agent process starts:
+
 ```json
-{
-  "run_id": "...",
-  "timestamp": "...",
-  "event": "spawn_started",
-  "data": {
-    "spawn_id": "...",
-    "agent": "/path/to/agent",
-    "command": ["agent", "args"...],
-    "cwd": "/working/dir",
-    "timeout_ms": 30000,
-    "pid": 12345
-  }
-}
+{"run_id":"run-...","timestamp":"...","event":"spawn_started","data":{"spawn_id":"spawn-...","agent":"opencode","command":["opencode","acp"],"cwd":"/path/to/dir","timeout_ms":300000,"pid":12345}}
 ```
 
-### spawn_completed
-Emitted on successful exit:
+**spawn_completed** — emitted when the agent exits successfully (code 0):
+
 ```json
-{
-  "run_id": "...",
-  "timestamp": "...",
-  "event": "spawn_completed",
-  "data": {
-    "spawn_id": "...",
-    "duration_ms": 123,
-    "exit_code": 0,
-    "result": {
-      "status": "success",
-      "summary": "agent completed successfully",
-      "run_id": "...",
-      "exit_code": 0
-    }
-  }
-}
+{"run_id":"run-...","timestamp":"...","event":"spawn_completed","data":{"spawn_id":"spawn-...","duration_ms":1234,"exit_code":0,"result":{"status":"success","summary":"agent 'opencode' completed successfully","run_id":"run-...","exit_code":0}}}
 ```
 
-### spawn_failed
-Emitted on error, timeout, or cancellation:
+**spawn_failed** — emitted when the agent exits non-zero, times out, or is cancelled:
+
 ```json
-{
-  "run_id": "...",
-  "timestamp": "...",
-  "event": "spawn_failed",
-  "data": {
-    "spawn_id": "...",
-    "error": "timeout after 30000ms",
-    "duration_ms": 30001
-  }
-}
+{"run_id":"run-...","timestamp":"...","event":"spawn_failed","data":{"spawn_id":"spawn-...","duration_ms":5000,"reason":"child process timed out after 5000ms","exit_code":null,"result":{"status":"failed","summary":"child process timed out after 5000ms","run_id":"run-...","error":"child process timed out after 5000ms"}}}
 ```
 
-## Nested Run Tracing
+### ACP protocol output (passthrough)
 
-When running nested agents, set `RUN_ID` in the environment to establish parent-child relationships:
+When `--prompt` is used, all ACP protocol data is passed through to stdout:
 
-```bash
-# Parent run
-export RUN_ID="run-parent-123"
+- **initialize response** (id:1) — agent capabilities and protocol version
+- **session/new response** (id:2) — session ID and available models
+- **session/prompt response** (id:3) — stopReason (e.g. "end_turn")
+- **session/update notifications** — agent_thought_chunk, agent_message_chunk, tool_call, tool_call_update, available_commands_update, usage_update, etc.
 
-# Child run will see:
-# - RUN_ID: its own generated run_id
-# - PARENT_RUN_ID: "run-parent-123"
-# - SPAWN_ID: generated spawn_id
-# - ACP_SPAWN_GOAL: the goal string
-```
+The agent's stdout is passed through unchanged. acp-spawn never parses, wraps, or modifies ACP output.
 
-This enables tracing a hierarchy of agent calls.
+### Stderr
 
-## Environment Variables
+Agent stderr and runtime errors go to stderr, never stdout.
 
-The spawned child receives:
-- `RUN_ID` - unique identifier for this run
-- `PARENT_RUN_ID` - parent's RUN_ID if set (for nested runs)
-- `SPAWN_ID` - unique identifier for this spawn
-- `ACP_SPAWN_GOAL` - the goal string passed to `--goal`
+## Run Tracing
 
-## Output Contract
+`acp-spawn` propagates run context through environment variables:
 
-- **stdout**: Lifecycle JSONL events + native child stdout passthrough
-- **stderr**: Debug output, human-readable logs, runtime errors
+| Env var | Purpose |
+|---------|---------|
+| `RUN_ID` | Unique ID for the current run. |
+| `PARENT_RUN_ID` | ID of the parent run (empty for root runs). |
+| `SPAWN_ID` | Unique ID for this spawn operation. |
 
-The child's stdout is passed through unchanged. If the child emits ACP or JSONL, you'll see it interleaved with lifecycle events.
+If `RUN_ID` is already set in the calling environment, `acp-spawn` captures it as `parent_run_id`. This enables nested tracing: a parent agent can spawn a child via `acp-spawn` and the relationship is visible in both stdout events and the child's environment.
 
-## Troubleshooting
+## Timeout and Cancellation
 
-### Agent not found
-Ensure the `--agent` path is correct and executable:
-```bash
-which <agent-path>
-```
-
-### Timeout issues
-Increase `--timeout-ms` if the agent needs more time:
-```bash
-acp-spawn run --agent ... --timeout-ms 120000
-```
-
-### Parse errors
-If output isn't valid JSONL, check if the child is writing to stderr (which acp-spawn forwards separately).
-
-### Nested runs not linking
-Ensure the parent sets `RUN_ID` in the environment before calling acp-spawn.
-
-## Tips
-
-1. **Start simple**: Run with a basic command first to verify setup:
-   ```bash
-   acp-spawn run --agent /bin/sh --goal "echo test" --cwd .
-   ```
-
-2. **Use jq liberally**: Filter and transform JSONL output for readability.
-
-3. **Check exit codes**: `spawn_completed` includes `exit_code`; non-zero indicates child error.
-
-4. **Monitor timeouts**: `spawn_failed` with "timeout" means the child exceeded `--timeout-ms`.
-
-5. **Preserve raw output**: Pipe to `tee` if you need both analysis and raw capture:
-   ```bash
-   acp-spawn run ... | tee output.jsonl | jq ...
-   ```
+- Default timeout: 5 minutes (300000 ms).
+- On timeout or signal (SIGINT / SIGTERM): sends SIGTERM to the entire child process group, waits 500 ms, then sends SIGKILL.
+- The `spawn_failed` event includes the termination reason.
+- The child runs in its own process group so all grandchildren are cleaned up.
 
 ## Non-Goals
 
@@ -213,6 +148,4 @@ acp-spawn intentionally does NOT:
 - Store traces or provide querying/aggregation
 - Normalize non-ACP stdout into ACP format
 - Orchestrate multiple runs (queuing, scheduling, retries)
-- Integrate with shells or require global installation
-
-It's a focused debug tool for inspecting individual agent invocations.
+- Parse, wrap, enrich, or reinterpret child ACP events beyond lifecycle emission and native passthrough
