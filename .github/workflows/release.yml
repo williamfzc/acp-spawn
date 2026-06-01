@@ -12,11 +12,11 @@ jobs:
     strategy:
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             artifact_os: linux
             artifact_arch: x86_64
-          - target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             artifact_os: linux
             artifact_arch: aarch64
@@ -41,14 +41,23 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install aarch64 linker
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Install cross
+        if: startsWith(matrix.target, 'x86_64-unknown-linux') || startsWith(matrix.target, 'aarch64-unknown-linux')
+        uses: taiki-e/install-action@cross
 
-      - name: Build release
+      - name: Build Linux release
+        if: startsWith(matrix.target, 'x86_64-unknown-linux') || startsWith(matrix.target, 'aarch64-unknown-linux')
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Verify Linux binary is static
+        if: startsWith(matrix.target, 'x86_64-unknown-linux') || startsWith(matrix.target, 'aarch64-unknown-linux')
+        run: |
+          file target/${{ matrix.target }}/release/acp-spawn | tee /tmp/acp-spawn-file.txt
+          grep -q "statically linked" /tmp/acp-spawn-file.txt
+
+      - name: Build macOS release
+        if: matrix.target == 'aarch64-apple-darwin'
         run: cargo build --release --target ${{ matrix.target }}
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
       - name: Package binary
         run: |
