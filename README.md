@@ -11,11 +11,11 @@ acp-spawn run --prompt "say hello" -- opencode acp
 ```
 
 ```json
+{"run_id":"run-0001253b-...","event":"spawn_started","data":{"spawn_id":"spawn-0001253b-...","agent":"opencode","command":["opencode","acp"],...}}
 {"id":1,"jsonrpc":"2.0","result":{"protocolVersion":1,"agentCapabilities":{...}}}
 {"id":2,"jsonrpc":"2.0","result":{"sessionId":"bf76e3d9-...","models":{...}}}
 {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"bf76e3d9-...","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"Hello","type":"text"}}}}
 {"id":3,"jsonrpc":"2.0","result":{"stopReason":"end_turn"}}
-{"run_id":"run-0001253b-...","event":"spawn_started","data":{"spawn_id":"spawn-0001253b-...","agent":"opencode","command":["opencode","acp"],...}}
 {"run_id":"run-0001253b-...","event":"spawn_completed","data":{"duration_ms":5432,"exit_code":0,...}}
 ```
 

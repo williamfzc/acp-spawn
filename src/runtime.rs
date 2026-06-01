@@ -229,67 +229,187 @@ pub fn run_with_event_sink<W: Write, E: Write, S: RuntimeEventSink>(
         }
     };
 
+    emitter.emit_started(
+        &request.agent,
+        &request.agent_args,
+        &cwd,
+        timeout_ms,
+        Some(running.pid()),
+    )?;
+
     if let Some(ref prompt_text) = request.prompt {
         let mut stdout_reader = running.take_stdout_reader().ok_or(RuntimeError::Process(
             ProcessError::MissingPipe { stream: "stdout" },
         ))?;
 
-        running.write_stdin(&acp::initialize_message())?;
-        let init_result = acp::read_response(&mut stdout_reader, 1).map_err(|e| {
-            RuntimeError::Process(ProcessError::ObserverFailed {
-                stream: "stdout",
-                reason: format!("initialize handshake failed: {e}"),
-            })
-        })?;
+        if let Err(error) = running.write_stdin(&acp::initialize_message()) {
+            running.return_stdout_reader(stdout_reader);
+            let error = RuntimeError::Process(error);
+            finish_prompt_setup_failure(
+                running,
+                cancellation,
+                &mut emitter,
+                &run,
+                &error.to_string(),
+            )?;
+            return Err(error);
+        }
+        let init_result = match acp::read_response(&mut stdout_reader, 1) {
+            Ok(result) => result,
+            Err(error) => {
+                running.return_stdout_reader(stdout_reader);
+                let error = RuntimeError::Process(ProcessError::ObserverFailed {
+                    stream: "stdout",
+                    reason: format!("initialize handshake failed: {error}"),
+                });
+                finish_prompt_setup_failure(
+                    running,
+                    cancellation,
+                    &mut emitter,
+                    &run,
+                    &error.to_string(),
+                )?;
+                return Err(error);
+            }
+        };
         if init_result.response.get("error").is_some() {
             let msg = init_result.response["error"]["message"]
                 .as_str()
                 .unwrap_or("unknown error");
-            return Err(RuntimeError::Process(ProcessError::ObserverFailed {
+            running.return_stdout_reader(stdout_reader);
+            let error = RuntimeError::Process(ProcessError::ObserverFailed {
                 stream: "stdout",
                 reason: format!("initialize rejected by agent: {msg}"),
-            }));
+            });
+            finish_prompt_setup_failure(
+                running,
+                cancellation,
+                &mut emitter,
+                &run,
+                &error.to_string(),
+            )?;
+            return Err(error);
         }
 
-        running.write_stdin(&acp::session_new_message(&cwd.display().to_string()))?;
-        let session_result = acp::read_response(&mut stdout_reader, 2).map_err(|e| {
-            RuntimeError::Process(ProcessError::ObserverFailed {
-                stream: "stdout",
-                reason: format!("session/new handshake failed: {e}"),
-            })
-        })?;
+        if let Err(error) =
+            running.write_stdin(&acp::session_new_message(&cwd.display().to_string()))
+        {
+            running.return_stdout_reader(stdout_reader);
+            let error = RuntimeError::Process(error);
+            finish_prompt_setup_failure(
+                running,
+                cancellation,
+                &mut emitter,
+                &run,
+                &error.to_string(),
+            )?;
+            return Err(error);
+        }
+        let session_result = match acp::read_response(&mut stdout_reader, 2) {
+            Ok(result) => result,
+            Err(error) => {
+                running.return_stdout_reader(stdout_reader);
+                let error = RuntimeError::Process(ProcessError::ObserverFailed {
+                    stream: "stdout",
+                    reason: format!("session/new handshake failed: {error}"),
+                });
+                finish_prompt_setup_failure(
+                    running,
+                    cancellation,
+                    &mut emitter,
+                    &run,
+                    &error.to_string(),
+                )?;
+                return Err(error);
+            }
+        };
         if session_result.response.get("error").is_some() {
             let msg = session_result.response["error"]["message"]
                 .as_str()
                 .unwrap_or("unknown error");
-            return Err(RuntimeError::Process(ProcessError::ObserverFailed {
+            running.return_stdout_reader(stdout_reader);
+            let error = RuntimeError::Process(ProcessError::ObserverFailed {
                 stream: "stdout",
                 reason: format!("session/new rejected by agent: {msg}"),
-            }));
+            });
+            finish_prompt_setup_failure(
+                running,
+                cancellation,
+                &mut emitter,
+                &run,
+                &error.to_string(),
+            )?;
+            return Err(error);
         }
-        let session_id = acp::extract_session_id(&session_result.response).map_err(|e| {
-            RuntimeError::Process(ProcessError::ObserverFailed {
-                stream: "stdout",
-                reason: e,
-            })
-        })?;
+        let session_id = match acp::extract_session_id(&session_result.response) {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                running.return_stdout_reader(stdout_reader);
+                let error = RuntimeError::Process(ProcessError::ObserverFailed {
+                    stream: "stdout",
+                    reason: error,
+                });
+                finish_prompt_setup_failure(
+                    running,
+                    cancellation,
+                    &mut emitter,
+                    &run,
+                    &error.to_string(),
+                )?;
+                return Err(error);
+            }
+        };
 
-        running.write_stdin(&acp::session_prompt_message(&session_id, prompt_text))?;
+        if let Err(error) =
+            running.write_stdin(&acp::session_prompt_message(&session_id, prompt_text))
+        {
+            running.return_stdout_reader(stdout_reader);
+            let error = RuntimeError::Process(error);
+            finish_prompt_setup_failure(
+                running,
+                cancellation,
+                &mut emitter,
+                &run,
+                &error.to_string(),
+            )?;
+            return Err(error);
+        }
 
-        let prompt_result = acp::read_response(&mut stdout_reader, 3).map_err(|e| {
-            RuntimeError::Process(ProcessError::ObserverFailed {
-                stream: "stdout",
-                reason: format!("session/prompt failed: {e}"),
-            })
-        })?;
+        let prompt_result = match acp::read_response(&mut stdout_reader, 3) {
+            Ok(result) => result,
+            Err(error) => {
+                running.return_stdout_reader(stdout_reader);
+                let error = RuntimeError::Process(ProcessError::ObserverFailed {
+                    stream: "stdout",
+                    reason: format!("session/prompt failed: {error}"),
+                });
+                finish_prompt_setup_failure(
+                    running,
+                    cancellation,
+                    &mut emitter,
+                    &run,
+                    &error.to_string(),
+                )?;
+                return Err(error);
+            }
+        };
         if prompt_result.response.get("error").is_some() {
             let msg = prompt_result.response["error"]["message"]
                 .as_str()
                 .unwrap_or("unknown error");
-            return Err(RuntimeError::Process(ProcessError::ObserverFailed {
+            running.return_stdout_reader(stdout_reader);
+            let error = RuntimeError::Process(ProcessError::ObserverFailed {
                 stream: "stdout",
                 reason: format!("session/prompt rejected by agent: {msg}"),
-            }));
+            });
+            finish_prompt_setup_failure(
+                running,
+                cancellation,
+                &mut emitter,
+                &run,
+                &error.to_string(),
+            )?;
+            return Err(error);
         }
 
         running.close_stdin();
@@ -342,14 +462,6 @@ pub fn run_with_event_sink<W: Write, E: Write, S: RuntimeEventSink>(
     }
 
     running.start_stdout_reader();
-
-    emitter.emit_started(
-        &request.agent,
-        &request.agent_args,
-        &cwd,
-        timeout_ms,
-        Some(running.pid()),
-    )?;
 
     let emitter = RefCell::new(emitter);
     let output = running.wait_with_streaming(
@@ -414,6 +526,18 @@ pub fn run_with_event_sink<W: Write, E: Write, S: RuntimeEventSink>(
             Err(error)
         }
     }
+}
+
+fn finish_prompt_setup_failure<W: Write, E: Write, S: RuntimeEventSink>(
+    running: process::RunningProcess,
+    _cancellation: &CancellationHandle,
+    emitter: &mut RuntimeEmitter<W, E, S>,
+    run: &RunContext,
+    reason: &str,
+) -> Result<(), RuntimeError> {
+    emitter.emit_failed(0, failure_result(run, reason, None), reason, None)?;
+    running.terminate_and_wait()?;
+    Ok(())
 }
 
 fn failure_result(run: &RunContext, summary: &str, exit_code: Option<i32>) -> SpawnResult {
@@ -817,6 +941,81 @@ exit 9
             RuntimeError::ChildExitedNonZero { exit_code, .. } => assert_eq!(exit_code, 9),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_emits_failed_event_when_prompt_handshake_fails() {
+        let cwd = create_temp_dir("runtime-prompt-handshake-failure");
+        let script = create_script(
+            "invalid-acp.sh",
+            r#"#!/bin/sh
+printf 'not-json\n'
+"#,
+        );
+
+        let stdout = SharedBuffer::default();
+        let error = run_with_io(
+            RunRequest {
+                agent: script.to_string_lossy().into_owned(),
+                agent_args: vec![],
+                cwd,
+                timeout: Some(Duration::from_millis(500)),
+                prompt: Some("hello".into()),
+            },
+            &CancellationHandle::new(),
+            stdout.writer(),
+            SharedBuffer::default().writer(),
+        )
+        .expect_err("run should fail");
+
+        let events = parse_json_lines(&stdout.contents());
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["event"], "spawn_started");
+        assert_eq!(events[1]["event"], "spawn_failed");
+        assert_eq!(events[1]["data"]["result"]["status"], "failed");
+        assert!(
+            events[1]["data"]["reason"]
+                .as_str()
+                .expect("reason should be a string")
+                .contains("initialize handshake failed")
+        );
+        assert!(matches!(error, RuntimeError::Process(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_does_not_wait_for_child_stdout_after_prompt_handshake_fails() {
+        let cwd = create_temp_dir("runtime-prompt-handshake-sleep");
+        let script = create_script(
+            "invalid-acp-sleep.sh",
+            r#"#!/bin/sh
+printf 'not-json\n'
+sleep 5
+"#,
+        );
+
+        let stdout = SharedBuffer::default();
+        let started_at = std::time::Instant::now();
+        let error = run_with_io(
+            RunRequest {
+                agent: script.to_string_lossy().into_owned(),
+                agent_args: vec![],
+                cwd,
+                timeout: None,
+                prompt: Some("hello".into()),
+            },
+            &CancellationHandle::new(),
+            stdout.writer(),
+            SharedBuffer::default().writer(),
+        )
+        .expect_err("run should fail");
+
+        assert!(started_at.elapsed() < Duration::from_secs(3));
+        let events = parse_json_lines(&stdout.contents());
+        assert_eq!(events[0]["event"], "spawn_started");
+        assert_eq!(events[1]["event"], "spawn_failed");
+        assert!(matches!(error, RuntimeError::Process(_)));
     }
 
     #[cfg(unix)]

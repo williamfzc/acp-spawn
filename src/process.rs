@@ -358,6 +358,31 @@ impl RunningProcess {
             })
     }
 
+    pub fn terminate(&mut self) -> Result<(), ProcessError> {
+        self.terminate_child()
+    }
+
+    pub fn terminate_and_wait(mut self) -> Result<ProcessOutput, ProcessError> {
+        self.close_stdin();
+        self.terminate_child()?;
+        let exit_status = self
+            .child
+            .wait()
+            .map_err(|error| ProcessError::WaitFailed {
+                program: self.program.clone(),
+                reason: error.to_string(),
+            })?;
+
+        Ok(ProcessOutput {
+            success: false,
+            exit_code: exit_status.code(),
+            termination: ProcessTermination::Cancelled {
+                reason: "setup failed".to_string(),
+            },
+            duration: self.started_at.elapsed(),
+        })
+    }
+
     fn terminate_child(&mut self) -> Result<(), ProcessError> {
         if self.try_wait()?.is_some() {
             return Ok(());
@@ -481,12 +506,28 @@ fn send_signal_to_child_group(
 ) -> Result<(), ProcessError> {
     use nix::errno::Errno;
     use nix::sys::signal::kill;
-    use nix::unistd::Pid;
+    use nix::unistd::{Pid, getpgid};
 
-    let process_group = Pid::from_raw(-(child.id() as i32));
+    let child_pid = Pid::from_raw(child.id() as i32);
+    let process_group = match getpgid(Some(child_pid)) {
+        Ok(process_group) => Pid::from_raw(-process_group.as_raw()),
+        Err(Errno::ESRCH) => return Ok(()),
+        Err(_) => Pid::from_raw(-(child.id() as i32)),
+    };
     match kill(process_group, signal) {
-        Ok(()) => Ok(()),
-        Err(Errno::ESRCH) => Ok(()),
+        Ok(()) => return Ok(()),
+        Err(Errno::ESRCH) => return Ok(()),
+        Err(Errno::EPERM) => {}
+        Err(error) => {
+            return Err(ProcessError::SignalFailed {
+                program: program.to_string(),
+                reason: error.to_string(),
+            });
+        }
+    }
+
+    match kill(child_pid, signal) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
         Err(error) => Err(ProcessError::SignalFailed {
             program: program.to_string(),
             reason: error.to_string(),
